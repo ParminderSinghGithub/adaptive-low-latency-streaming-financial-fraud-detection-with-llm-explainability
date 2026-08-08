@@ -176,3 +176,6 @@ outputs/figures/**/*.pdf
 outputs/tables/**/*.csv
 outputs/tables/**/*.tex
 outputs/metrics/**/*.json
+
+# internal docs
+docs/internal
