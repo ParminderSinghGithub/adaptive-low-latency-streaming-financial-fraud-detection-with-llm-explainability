@@ -1,0 +1,33 @@
+# Phase 2 Example Experiment Configuration
+experiment_id: E2_IEEE_CIS_P2_ADWIN_01
+seed: 42
+
+dataset:
+  name: ieee_cis
+  path: datasets/ieee_cis/
+  warmup_fraction: 0.15
+  categorical_features:
+    - ProductCD
+    - card4
+    - card6
+    - P_emaildomain
+    - R_emaildomain
+
+learner:
+  type: hoeffding_tree
+  params:
+    grace_period: 200
+    split_confidence: 1e-07
+
+detector:
+  type: adwin
+  delta: 0.002
+
+policy:
+  type: global_drift_triggered
+  adaptation_window_size: 5000
+  periodic_interval: 10000
+  segment_feature: ProductCD
+
+output:
+  artifact_dir: results/ieee_cis/E2/P2_ADWIN/

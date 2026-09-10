@@ -170,6 +170,8 @@ logs/*.log
 outputs/checkpoints/**/*.pt
 outputs/checkpoints/**/*.pth
 outputs/checkpoints/**/*.joblib
+outputs/checkpoints/**/*.json
+outputs/checkpoints/*.json
 outputs/figures/**/*.png
 outputs/figures/**/*.jpg
 outputs/figures/**/*.pdf
@@ -179,3 +181,9 @@ outputs/metrics/**/*.json
 
 # internal docs
 docs/internal
+
+# Kaggle artifacts and downloaded run archives (not source controlled)
+kaggle_artifacts/*
+!kaggle_artifacts/.gitkeep
+!kaggle_artifacts/README.md
+*.tar.gz

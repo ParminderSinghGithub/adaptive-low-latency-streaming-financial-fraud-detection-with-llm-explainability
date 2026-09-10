@@ -27,6 +27,7 @@ project_root/
 ├── datasets/             # Raw transactional datasets (git-ignored)
 ├── docs/                 # Research, architecture, and meeting documentation
 ├── experiments/          # Saved experimental configurations and results
+├── kaggle_artifacts/     # Staging area for downloaded Kaggle run archives (git-ignored)
 ├── logs/                 # Operational and training log outputs
 ├── models/               # Serialized model checkpoints and artifacts
 ├── notebooks/            # Jupyter Notebooks for exploratory analysis and prototyping
@@ -50,13 +51,13 @@ project_root/
 └── tests/                # Unit and integration test suites
 ```
 
-## Technology Stack (Planned)
-- **Core Language:** Python 3.10+
-- **Data & Streaming:** Pandas, NumPy, Scikit-Learn, PySpark / River (incremental learning utilities)
-- **Machine Learning & Deep Learning:** XGBoost, LightGBM, PyTorch (for neural streaming baselines)
-- **Explainability:** SHAP (SHUp-ley Additive exPlanations)
-- **LLM Integration:** Hugging Face Transformers (optional, for local/open-source LLM-based explanation generation)
-- **Testing & Quality Assurance:** Pytest, Black, Isort, Flake8
+## Technology Stack
+- **Core Language:** Python 3.12+ (tested on Python 3.12)
+- **Data & Streaming:** Pandas, NumPy, Scikit-Learn, River (online learning and streaming drift detection)
+- **Machine Learning Models:** Hoeffding Tree & Adaptive Random Forest (via River), LightGBM (offline reference)
+- **Explainability:** SHAP (SHapley Additive exPlanations)
+- **LLM Integration:** Hugging Face Transformers / API (for grounded narrative translation)
+- **Testing & Quality Assurance:** Pytest, Black, Isort, Flake8, GitHub Actions CI
 
 ## Dataset Overview
 The project will explore adaptive fraud detection across three benchmark transactional datasets:
