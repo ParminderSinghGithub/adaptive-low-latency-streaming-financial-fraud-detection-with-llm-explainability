@@ -12,7 +12,7 @@
 
 | Exp ID | Experiment Name | Primary Target RQ / Obj | Dataset | Policy Matrix | Base Learner | Drift Detector | Status | Output Directory |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **E1** | Static vs. Adaptive | RQ1 / Obj 1 | IEEE-CIS | $P0$ vs. $(P1, P2, P3)$ | Hoeffding Tree | ADWIN | Pending | `results/ieee_cis/E1/` |
+| **E1** | Incremental vs. Adaptive | RQ1 / Obj 1 | IEEE-CIS | $P0$ vs. $(P1, P2, P3)$ | Hoeffding Tree | ADWIN | Pending | `results/ieee_cis/E1/` |
 | **E2** | Policy Comparison | RQ1 / Obj 1 | IEEE-CIS | $P0, P1, P2, P3$ | Hoeffding Tree | ADWIN | Pending | `results/ieee_cis/E2/` |
 | **E3** | Drift-Regime Interaction | RQ2 / Obj 2 | IEEE-CIS | $P0–P3$ across Regimes | Hoeffding Tree | ADWIN | Pending | `results/ieee_cis/E3/` |
 | **E4** | Global vs. Local Adaptation | RQ3 / Obj 3 | IEEE-CIS | $P2$ Global vs. $P3$ Segment | Hoeffding Tree | ADWIN | Pending | `results/ieee_cis/E4/` |

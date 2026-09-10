@@ -37,28 +37,28 @@ Phase 2  STREAM  (t = t_warmup … T − 1) — the prequential loop:
           ŷ_pred_t = int(ŷ_prob_t >= 0.5)
           e_t = |y_t − ŷ_pred_t| ∈ {0, 1}
 
-  Step 5  CONCEPT DRIFT MONITOR UPDATE
+  Step 5  INCREMENTAL ONLINE UPDATE (P0–P3)
+          active_model.learn_one(x_t, y_t)
+          (Executed by default under p0_mode="incremental" for all policies;
+           skipped only if P0 auxiliary p0_mode="frozen" is active).
+
+  Step 6  CONCEPT DRIFT MONITOR UPDATE
           drift_monitor.update(e_t, tx_index=t, segment_key=seg_t)
 
-  Step 6  MEMORY BUFFER UPDATE
+  Step 7  MEMORY BUFFER UPDATE
           retrainer.add(x_t, y_t, seg_t)
           (Current sample enters W_adapt before adaptation evaluation)
 
-  Step 7  POLICY TRIGGER EVALUATION
+  Step 8  POLICY TRIGGER EVALUATION & MODEL SWAP
           new_model = policy_manager.step(
               tx_index=t, current_model=active_model, segment_key=seg_t
           )
-
-  Step 8  MODEL ADAPTATION SWAP vs. ONLINE UPDATE
           if new_model is not None:
               - P3 (segment scope): self._segment_models[seg_t] = new_model
                 (Only the affected sub-population model is replaced; all other
                  segment models are completely untouched, preserving isolation).
               - P1 / P2 (global scope): self._learner = new_model
-              (The retrained model has been fitted on W_adapt including (x_t, y_t)).
-          else:
-              - P1, P2, P3: active_model.learn_one(x_t, y_t)  (ordinary online update)
-              - P0 Static: NO update performed (model remains strictly frozen post-warmup).
+                (The retrained model has been fitted on W_adapt including (x_t, y_t)).
 
   Advance to t+1.
 
@@ -514,7 +514,13 @@ class PrequentialRunner:
         # --- Step 4: True label revelation & error calculation ---
         error_t: int = abs(y_t - y_pred_t)
 
-        # --- Step 5: Drift detector update ---
+        # --- Step 5: Incremental online learning update ---
+        # Under default p0_mode="incremental", all policies P0–P3 call learn_one(x_t, y_t).
+        # Under auxiliary p0_mode="frozen", P0 skips learn_one to isolate raw drift degradation.
+        if self._policy_name != "P0" or self._p0_mode == "incremental":
+            active_model.learn_one(x_t, y_t)
+
+        # --- Step 6: Drift detector update ---
         self._monitor.update(error=error_t, tx_index=tx_index, segment_key=seg_t)
         global_drift = self._monitor.global_drift_detected
         segment_drift = (
@@ -522,17 +528,17 @@ class PrequentialRunner:
             if seg_t is not None else False
         )
 
-        # --- Step 6: Memory buffer update (current sample enters W_adapt) ---
+        # --- Step 7: Memory buffer update (current sample enters W_adapt) ---
         self._retrainer.add(x_t, y_t, seg_t)
 
-        # --- Step 7: Policy trigger evaluation ---
+        # --- Step 8: Policy trigger evaluation ---
         new_model = self._policy.step(
             tx_index=tx_index,
             current_model=active_model,
             segment_key=seg_t,
         )
 
-        # --- Step 8: Adaptation swap vs. ordinary online update ---
+        # --- Step 9: Model adaptation swap if triggered ---
         adapted = False
         adaptation_scope: Optional[str] = None
         if new_model is not None:
@@ -548,12 +554,6 @@ class PrequentialRunner:
             else:
                 # Replace the global active model
                 self._learner = new_model
-        else:
-            # Ordinary online learning update
-            # Under default p0_mode="incremental", P0-P3 all execute learn_one.
-            # Under p0_mode="frozen", P0 is completely frozen (skips learn_one).
-            if self._policy_name != "P0" or self._p0_mode == "incremental":
-                active_model.learn_one(x_t, y_t)
 
         return StreamingRecord(
             tx_index=tx_index,

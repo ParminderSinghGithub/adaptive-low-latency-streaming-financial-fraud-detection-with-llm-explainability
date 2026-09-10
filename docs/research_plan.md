@@ -16,7 +16,7 @@ While streaming machine learning algorithms and statistical drift detectors iden
 ### Central Problem Statement
 > **How should model adaptation be triggered and scoped after concept drift in streaming financial fraud detection so that predictive performance can be maintained while controlling latency and computational adaptation cost?**
 
-The thesis systematically investigates **model-update and retraining policies** (**P0 Static**, **P1 Periodic**, **P2 Global Drift-Triggered**, **P3 Segment-Aware Drift-Triggered**), measuring predictive performance jointly with operational costs across diverse drift regimes.
+The thesis systematically investigates **model-update and retraining policies** (**P0 Incremental-only Baseline**, **P1 Periodic**, **P2 Global Drift-Triggered**, **P3 Segment-Aware Drift-Triggered**), measuring predictive performance jointly with operational costs across diverse drift regimes.
 
 ---
 
@@ -61,7 +61,7 @@ The thesis systematically investigates **model-update and retraining policies** 
 
 | Exp ID | Experiment Name | Term | Primary Target | Core Focus |
 | :--- | :--- | :--- | :--- | :--- |
-| **E1** | Static vs. Adaptive | **Term 2** | RQ1 / Obj 1 | Adaptation benefit: $P0$ Static vs. $(P1, P2, P3)$ |
+| **E1** | Incremental vs. Adaptive | **Term 2** | RQ1 / Obj 1 | Adaptation benefit: $P0$ Incremental vs. $(P1, P2, P3)$ |
 | **E2** | Policy Comparison | **Term 2** | RQ1 / Obj 1 | Full comparison across $P0, P1, P2, P3$ |
 | **E3** | Drift-Regime Interaction | **Term 2** | RQ2 / Obj 2 | Robustness across Sudden, Gradual, Recurring, Localized drift |
 | **E4** | Global vs. Local Adaptation | **Term 2** | RQ3 / Obj 3 | $P2$ Global vs. $P3$ Segment-Aware under localized drift |
