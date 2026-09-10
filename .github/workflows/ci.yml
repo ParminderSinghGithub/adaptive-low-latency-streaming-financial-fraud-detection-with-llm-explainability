@@ -25,7 +25,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -e .
 
       - name: Run automated test suite
+        env:
+          PYTHONPATH: .
         run: |
           pytest -v tests/
+
