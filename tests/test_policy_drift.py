@@ -62,13 +62,15 @@ class TestDriftMonitorConstruction:
         monitor = DriftMonitor(segment_aware=True)
         assert monitor.segment_aware is True
 
-    def test_kswin_detector(self):
-        monitor = DriftMonitor(detector_type="kswin")
-        assert monitor.detector_type == "kswin"
+    def test_hddm_w_detector(self):
+        """HDDM_W available via river.drift.binary.HDDMW (River >= 0.21)."""
+        monitor = DriftMonitor(detector_type="hddm_w")
+        assert monitor.detector_type == "hddm_w"
 
-    def test_page_hinkley_detector(self):
-        monitor = DriftMonitor(detector_type="page_hinkley")
-        assert monitor.detector_type == "page_hinkley"
+    def test_hddm_a_detector(self):
+        """HDDM_A available via river.drift.binary.HDDMA (River >= 0.21)."""
+        monitor = DriftMonitor(detector_type="hddm_a")
+        assert monitor.detector_type == "hddm_a"
 
     def test_invalid_detector_type_raises(self):
         with pytest.raises(ValueError, match="Unsupported detector type"):

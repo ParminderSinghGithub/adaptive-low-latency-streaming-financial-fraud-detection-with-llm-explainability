@@ -1,9 +1,8 @@
 """
 Multi-stream concept drift monitor.
 
-Provides a unified abstraction over River's ADWIN and alternative drift
-detectors, supporting both a single global stream and per-segment (P3)
-sub-streams.
+Provides a unified abstraction over River's ADWIN and HDDM drift detectors,
+supporting both a single global stream and per-segment (P3) sub-streams.
 
 Design constraints (DEC-01 – DEC-06 / Source of Truth §7 & §8):
 - Drift is detected on the binary 0-1 prediction error: e_t = |y_t - y_hat_t|.
@@ -14,18 +13,28 @@ Design constraints (DEC-01 – DEC-06 / Source of Truth §7 & §8):
 
 Supported detector types
 ------------------------
-- ``"adwin"``       → river.drift.ADWIN       (primary, DEC-03 / OP-03)
-- ``"kswin"``       → river.drift.KSWIN       (secondary, E5)
-- ``"page_hinkley"``→ river.drift.PageHinkley (secondary, E5 variant)
+- ``"adwin"``   → river.drift.ADWIN                (primary,   DEC-03 / OP-03)
+- ``"hddm_w"``  → river.drift.binary.HDDMW          (secondary, E5 — moving-weighted-average test)
+- ``"hddm_a"``  → river.drift.binary.HDDMA          (secondary, E5 — moving-average test)
 
-Note: River ≥ 0.21 ships ADWIN, KSWIN, and PageHinkley.  HDDM_W/HDDM_A
-are not present in this release; KSWIN and PageHinkley are used instead for
-the E5 detector-sensitivity comparison.
+River API note (v0.21+)
+-----------------------
+In River ≥ 0.21 the HDDM detectors live under ``river.drift.binary`` with
+class names ``HDDMW`` and ``HDDMA`` (no underscore suffix).  They are NOT
+re-exported from the top-level ``river.drift`` namespace (hence the
+``ImportError`` encountered with ``from river.drift import HDDM_W``).
+The canonical import paths are:
+
+    from river.drift.binary import HDDMW  # moving weighted-average test
+    from river.drift.binary import HDDMA  # moving average test
+
+Both classes expose the same ``update(value)`` / ``drift_detected``
+interface as ADWIN, making them drop-in compatible with this module.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -38,35 +47,43 @@ def _make_detector(detector_type: str, **kwargs: Any):
     Parameters
     ----------
     detector_type:
-        One of ``"adwin"`` (default), ``"kswin"``, or ``"page_hinkley"``.
+        One of ``"adwin"`` (default), ``"hddm_w"``, or ``"hddm_a"``.
     **kwargs:
         Keyword arguments forwarded directly to the River detector constructor.
-        Typical: ``delta=0.002`` for ADWIN.
+        - ADWIN: ``delta`` (float, default 0.002)
+        - HDDMW / HDDMA: ``drift_confidence``, ``warning_confidence``
 
     Returns
     -------
     A River drift detector instance with an ``update(value)`` method and a
     ``drift_detected`` boolean property.
+
+    Raises
+    ------
+    ValueError
+        If ``detector_type`` is not one of the supported values.
     """
     dt = detector_type.lower()
     if dt == "adwin":
         from river.drift import ADWIN  # type: ignore[import]
         return ADWIN(**kwargs)
-    elif dt == "kswin":
-        from river.drift import KSWIN  # type: ignore[import]
-        return KSWIN(**kwargs)
-    elif dt == "page_hinkley":
-        from river.drift import PageHinkley  # type: ignore[import]
-        return PageHinkley(**kwargs)
+    elif dt == "hddm_w":
+        # River ≥ 0.21: HDDMW lives in river.drift.binary, not river.drift
+        from river.drift.binary import HDDMW  # type: ignore[import]
+        return HDDMW(**kwargs)
+    elif dt == "hddm_a":
+        # River ≥ 0.21: HDDMA lives in river.drift.binary, not river.drift
+        from river.drift.binary import HDDMA  # type: ignore[import]
+        return HDDMA(**kwargs)
     else:
         raise ValueError(
             f"Unsupported detector type '{detector_type}'. "
-            "Choose from: 'adwin', 'kswin', 'page_hinkley'."
+            "Choose from: 'adwin', 'hddm_w', 'hddm_a'."
         )
 
 
 # ---------------------------------------------------------------------------
-# DriftEvent dataclass (lightweight, no dataclasses import needed)
+# DriftEvent  (lightweight record — no dataclasses dependency)
 # ---------------------------------------------------------------------------
 
 class DriftEvent:
@@ -107,15 +124,15 @@ class DriftMonitor:
     Maintains a single *global* detector (used by P2) and, optionally, one
     *segment* detector per categorical key value seen so far (used by P3).
 
-    All detectors share the same detector type and constructor kwargs so that
-    detector sensitivity is held constant during policy comparisons (confound
-    control rule §8 of the Source of Truth).
+    All sub-detectors share the same detector type and constructor kwargs so
+    that detection sensitivity is held constant during policy comparisons
+    (confound control, Source of Truth §8).
 
     Parameters
     ----------
     detector_type:
-        Drift detector to use.  One of ``"adwin"`` (default), ``"hddm_w"``,
-        ``"hddm_a"``.
+        Drift detector to use.  One of ``"adwin"`` (default, primary),
+        ``"hddm_w"`` (E5 secondary), or ``"hddm_a"`` (E5 secondary).
     segment_aware:
         If ``True``, maintain per-segment sub-stream detectors (required for
         P3).  If ``False``, only the global detector is active.
@@ -151,7 +168,7 @@ class DriftMonitor:
         # Event log: list of DriftEvent (ordered by tx_index).
         self._events: List[DriftEvent] = []
 
-        # Running counters per stream key.
+        # Running update counters per stream key.
         self._update_counts: Dict[str, int] = {"global": 0}
 
     # ------------------------------------------------------------------
@@ -167,7 +184,7 @@ class DriftMonitor:
         """Feed a single prediction error to the monitor.
 
         Must be called AFTER label revelation, strictly in temporal order.
-        ``error`` should be ``|y_t - y_hat_t|`` in {0, 1}.
+        ``error`` should be ``|y_t - y_hat_t|`` ∈ {0, 1}.
 
         Parameters
         ----------
@@ -277,6 +294,7 @@ class DriftMonitor:
         """Reset all detectors and clear the event log.
 
         Useful between independent experimental runs (10-seed replication).
+        Does NOT reset the memory buffer — that is externally managed.
         """
         self._global_detector = _make_detector(
             self._detector_type, **self._detector_kwargs
