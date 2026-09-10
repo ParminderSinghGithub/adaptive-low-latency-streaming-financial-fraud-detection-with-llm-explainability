@@ -110,8 +110,14 @@ def load_ieee_cis(
     tx_filename = f"{split}_transaction.csv"
     tx_path = dir_path / tx_filename
 
+    # If file is not in dir_path directly, search subdirectories (e.g. dir_path / 'ieee_cis')
     if not tx_path.exists():
-        raise FileNotFoundError(f"Missing required transaction file: {tx_path}")
+        candidates = list(dir_path.rglob(tx_filename))
+        if candidates:
+            tx_path = candidates[0]
+            dir_path = tx_path.parent
+        else:
+            raise FileNotFoundError(f"Missing required transaction file: {tx_path}")
 
     df_tx = pd.read_csv(tx_path)
 
@@ -128,6 +134,11 @@ def load_ieee_cis(
 
     id_filename = f"{split}_identity.csv"
     id_path = dir_path / id_filename
+
+    if not id_path.exists():
+        id_candidates = list(dir_path.rglob(id_filename))
+        if id_candidates:
+            id_path = id_candidates[0]
 
     if id_path.exists():
         df_id = pd.read_csv(id_path)
@@ -161,6 +172,8 @@ def load_paysim(data_dir: Union[str, Path]) -> pd.DataFrame:
 
     csv_files = sorted(dir_path.glob("*.csv"))
     if not csv_files:
+        csv_files = sorted(dir_path.rglob("*.csv"))
+    if not csv_files:
         raise FileNotFoundError(f"No CSV file found in PaySim directory: {dir_path}")
 
     # Select the largest CSV file in the directory if multiple exist
@@ -179,16 +192,16 @@ def load_paysim(data_dir: Union[str, Path]) -> pd.DataFrame:
 
 def load_ulb(data_dir: Union[str, Path]) -> pd.DataFrame:
     """
-    Load raw ULB Credit Card Fraud CSV (`creditcard.csv`).
+    Load raw ULB Credit Card Fraud dataset CSV.
 
     Args:
-        data_dir: Directory containing `creditcard.csv`.
+        data_dir: Directory containing raw creditcard.csv file.
 
     Returns:
-        pd.DataFrame containing raw ULB credit card transactions.
+        pd.DataFrame containing raw ULB transactions.
 
     Raises:
-        FileNotFoundError: If data directory or `creditcard.csv` is missing.
+        FileNotFoundError: If data directory or creditcard.csv file is missing.
         ValueError: If required ULB schema columns are missing.
     """
     dir_path = Path(data_dir)
@@ -197,10 +210,11 @@ def load_ulb(data_dir: Union[str, Path]) -> pd.DataFrame:
 
     ulb_path = dir_path / "creditcard.csv"
     if not ulb_path.exists():
-        csv_files = sorted(dir_path.glob("*.csv"))
-        if not csv_files:
+        candidates = list(dir_path.rglob("creditcard.csv"))
+        if candidates:
+            ulb_path = candidates[0]
+        else:
             raise FileNotFoundError(f"Missing required ULB CSV file: {ulb_path}")
-        ulb_path = csv_files[0]
 
     df = pd.read_csv(ulb_path)
 
