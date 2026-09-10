@@ -70,7 +70,12 @@ Design constraints
 - All components are injected by the caller (learner, retrainer, monitor,
   policy_manager, metrics_tracker).  The runner does NOT construct them.
 - The runner is stateless between runs IF `reset()` is called.
-- P0 Static baseline is strictly frozen post-warmup (zero learn_one updates).
+- Online incremental learning: In all policies P0–P3, ``learn_one(x_t, y_t)``
+  is executed after each label revelation by default (``p0_mode="incremental"``)
+  to simulate realistic continuous streaming learning; ``retrain_window(W_adapt)``
+  is an additional, heavier adaptation event governed by P1–P3 triggers and
+  omitted in P0. An optional ``p0_mode="frozen"`` is supported for isolating
+  pure concept drift degradation against an un-updated model.
 - P3 maintains independent per-segment learners. Restricting retraining to
   the affected segment does NOT replace or degrade other segment models.
 """
@@ -291,6 +296,7 @@ class PrequentialRunner:
         policy_name: str = "P0",
         detector_type: str = "adwin",
         learner_factory: Optional[Any] = None,
+        p0_mode: str = "incremental",
     ) -> None:
         self._learner = learner
         self._retrainer = retrainer
@@ -300,8 +306,14 @@ class PrequentialRunner:
         self._policy_name = policy_name
         self._detector_type = detector_type
         self._learner_factory = learner_factory or getattr(retrainer, "learner_factory", None)
+        self._p0_mode = p0_mode.lower()
         # Dedicated per-segment model registry (active under P3)
         self._segment_models: Dict[str, Any] = {}
+
+    @property
+    def p0_mode(self) -> str:
+        """Operating mode for P0 baseline ('incremental' vs 'frozen')."""
+        return self._p0_mode
 
     @property
     def segment_models(self) -> Dict[str, Any]:
@@ -537,8 +549,10 @@ class PrequentialRunner:
                 # Replace the global active model
                 self._learner = new_model
         else:
-            # Ordinary online learning update (P1, P2, P3 only; P0 is frozen post-warmup)
-            if self._policy_name != "P0":
+            # Ordinary online learning update
+            # Under default p0_mode="incremental", P0-P3 all execute learn_one.
+            # Under p0_mode="frozen", P0 is completely frozen (skips learn_one).
+            if self._policy_name != "P0" or self._p0_mode == "incremental":
                 active_model.learn_one(x_t, y_t)
 
         return StreamingRecord(
@@ -601,6 +615,7 @@ class PrequentialRunner:
         detector_kwargs: Optional[Dict[str, Any]] = None,
         segment_aware: bool = False,
         seed: Optional[int] = None,
+        p0_mode: str = "incremental",
     ) -> "PrequentialRunner":
         """Convenience factory that wires all components together.
 
@@ -688,6 +703,7 @@ class PrequentialRunner:
             policy_name=policy_key,
             detector_type=detector_key,
             learner_factory=_learner_factory,
+            p0_mode=p0_mode,
         )
 
     # ------------------------------------------------------------------

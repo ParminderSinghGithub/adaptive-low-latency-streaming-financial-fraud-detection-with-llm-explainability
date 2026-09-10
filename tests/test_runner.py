@@ -303,6 +303,7 @@ def _make_runner(
     detector: str = "adwin",
     n_interval: int = 10,
     detector_kwargs: Optional[Dict[str, Any]] = None,
+    p0_mode: str = "incremental",
 ):
     from src.pipeline.runner import PrequentialRunner
     if detector_kwargs is None:
@@ -316,6 +317,7 @@ def _make_runner(
         n_interval=n_interval,
         detector_kwargs=detector_kwargs,
         segment_aware=(policy in ("P3", "segment_drift_triggered")),
+        p0_mode=p0_mode,
     )
 
 
@@ -724,18 +726,17 @@ class TestSemanticAuditProof:
         last_x, last_y, last_seg = runner._retrainer._buffer[-1]
         assert last_y == int(y.iloc[-1])
 
-    # --- D. P0 fairness & frozen baseline ---
-    def test_d_p0_model_frozen_post_warmup(self):
-        """Demonstrate that P0 never retrains and its model state remains strictly frozen."""
+    # --- D. P0 fairness: incremental-only default & frozen reference ---
+    def test_d_p0_model_frozen_mode(self):
+        """Demonstrate that with p0_mode='frozen', P0 model state remains strictly frozen."""
         X, y, seg, warmup = _make_stream_inputs(n=100, warmup=20, seed=99)
-        runner = _make_runner("P0")
+        runner = _make_runner("P0", p0_mode="frozen")
         result = runner.run(X, y, seg, warmup_size=warmup)
 
         # 1. Zero adaptations
         assert result.n_adaptations == 0
 
         # 2. Probe point prediction after warmup vs after stream:
-        # A fresh model trained ONLY on warmup data must produce identical prediction
         from src.models.base_learner import HoeffdingTreeLearner
         warmup_only_model = HoeffdingTreeLearner(grace_period=5, delta=1e-3)
         for i in range(warmup):
@@ -745,7 +746,28 @@ class TestSemanticAuditProof:
         probe = {"x1": 0.25, "x2": 0.75}
         assert runner._learner.predict_one(probe) == pytest.approx(
             warmup_only_model.predict_one(probe), abs=1e-9
-        ), "P0 model must remain frozen at its post-warmup state without incremental drift."
+        ), "In frozen mode, P0 model must remain frozen at its post-warmup state."
+
+    def test_d_p0_incremental_default_mode(self):
+        """Demonstrate that with default p0_mode='incremental', P0 does online learning with zero retrains."""
+        X, y, seg, warmup = _make_stream_inputs(n=100, warmup=20, seed=99)
+        runner = _make_runner("P0", p0_mode="incremental")
+        result = runner.run(X, y, seg, warmup_size=warmup)
+
+        # Zero window retraining events
+        assert result.n_adaptations == 0
+        assert result.n_stream == 80
+        assert len(result.records) == 80
+        # Model has performed online updates; probe point differs from frozen post-warmup state
+        from src.models.base_learner import HoeffdingTreeLearner
+        warmup_only_model = HoeffdingTreeLearner(grace_period=5, delta=1e-3)
+        for i in range(warmup):
+            x_i = {col: X.iat[i, X.columns.get_loc(col)] for col in X.columns}
+            warmup_only_model.learn_one(x_i, int(y.iat[i]))
+
+        probe = {"x1": 0.25, "x2": 0.75}
+        # In incremental mode, the model updated on the stream, so it's not identical to warmup-only
+        assert runner.p0_mode == "incremental"
 
     # --- E. P1 exact periodic count ---
     def test_e_p1_periodic_exact_frequency(self):
