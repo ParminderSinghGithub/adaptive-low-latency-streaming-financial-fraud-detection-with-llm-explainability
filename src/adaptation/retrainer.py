@@ -188,6 +188,11 @@ class RetrainingEngine:
         """Maximum capacity of the sliding memory window."""
         return self._window_size
 
+    @property
+    def learner_factory(self) -> Callable[[], Any]:
+        """Callable returning a fresh, untrained learner instance."""
+        return self._learner_factory
+
     def segment_counts(self) -> dict:
         """Return count of buffer entries per segment key."""
         counts: dict = {}

@@ -657,3 +657,195 @@ class TestRunResultStructure:
         result = runner.run(X, y, seg, warmup_size=warmup)
         assert "p50" in result.latency_percentiles
         assert "p95" in result.latency_percentiles
+
+    def test_to_records_dataframe(self):
+        runner = _make_runner("P0")
+        X, y, seg, warmup = _make_stream_inputs(n=50, warmup=10)
+        result = runner.run(X, y, seg, warmup_size=warmup)
+        df = result.to_records_dataframe()
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 40
+        assert "tx_index" in df.columns
+        assert "y_prob" in df.columns
+
+
+# ---------------------------------------------------------------------------
+# 6. Focused Semantic Audit Proof Suite (Requirements A through J)
+# ---------------------------------------------------------------------------
+
+class TestSemanticAuditProof:
+    """Comprehensive proof suite validating prequential correctness and policy fairness."""
+
+    # --- A. Prediction-before-label-use ---
+    def test_a_prediction_before_label_use(self):
+        """Demonstrate that y_t cannot influence prediction at t."""
+        X, y, seg, warmup = _make_stream_inputs(n=60, warmup=20, seed=42)
+
+        # Run with y[warmup + 5] = 0
+        y1 = y.copy()
+        y1.iloc[warmup + 5] = 0
+        runner1 = _make_runner("P1")
+        res1 = runner1.run(X, y1, seg, warmup_size=warmup)
+
+        # Run with y[warmup + 5] = 1 (label flipped)
+        y2 = y.copy()
+        y2.iloc[warmup + 5] = 1
+        runner2 = _make_runner("P1")
+        res2 = runner2.run(X, y2, seg, warmup_size=warmup)
+
+        # Prediction probability at stream index 5 MUST be exactly identical
+        assert res1.records[5].y_prob == pytest.approx(res2.records[5].y_prob, abs=1e-12), (
+            "Prediction at t must NOT be influenced by the revealed label y_t at t."
+        )
+
+    # --- B. Exact adaptation timing ---
+    def test_b_exact_adaptation_timing(self):
+        """Verify the exact transaction indices at which P1 adaptation occurs."""
+        X, y, seg, warmup = _make_stream_inputs(n=80, warmup=20, seed=0)
+        # N_interval = 10 -> adaptations should trigger at row indices:
+        # warmup + 10 - 1 = 29, then 39, 49, 59, 69, 79
+        runner = _make_runner("P1", n_interval=10)
+        result = runner.run(X, y, seg, warmup_size=warmup)
+        actual_indices = [entry["tx_index"] for entry in result.adaptation_log]
+        expected_indices = [warmup + (k * 10) - 1 for k in range(1, 7)]
+        assert actual_indices == expected_indices, (
+            f"Expected adaptations at {expected_indices}, got {actual_indices}"
+        )
+
+    # --- C. Current-observation handling ---
+    def test_c_current_observation_in_retraining_window(self):
+        """Verify whether current (x_t, y_t) belongs to the adaptation window upon trigger."""
+        X, y, seg, warmup = _make_stream_inputs(n=40, warmup=10, seed=1)
+        runner = _make_runner("P1", n_interval=5)
+        # Check buffer contents immediately after run: buffer must contain the final sample
+        result = runner.run(X, y, seg, warmup_size=warmup)
+        assert runner._retrainer.buffer_size >= 5
+        # The last entry in the memory buffer must correspond to the final stream observation
+        last_x, last_y, last_seg = runner._retrainer._buffer[-1]
+        assert last_y == int(y.iloc[-1])
+
+    # --- D. P0 fairness & frozen baseline ---
+    def test_d_p0_model_frozen_post_warmup(self):
+        """Demonstrate that P0 never retrains and its model state remains strictly frozen."""
+        X, y, seg, warmup = _make_stream_inputs(n=100, warmup=20, seed=99)
+        runner = _make_runner("P0")
+        result = runner.run(X, y, seg, warmup_size=warmup)
+
+        # 1. Zero adaptations
+        assert result.n_adaptations == 0
+
+        # 2. Probe point prediction after warmup vs after stream:
+        # A fresh model trained ONLY on warmup data must produce identical prediction
+        from src.models.base_learner import HoeffdingTreeLearner
+        warmup_only_model = HoeffdingTreeLearner(grace_period=5, delta=1e-3)
+        for i in range(warmup):
+            x_i = {col: X.iat[i, X.columns.get_loc(col)] for col in X.columns}
+            warmup_only_model.learn_one(x_i, int(y.iat[i]))
+
+        probe = {"x1": 0.25, "x2": 0.75}
+        assert runner._learner.predict_one(probe) == pytest.approx(
+            warmup_only_model.predict_one(probe), abs=1e-9
+        ), "P0 model must remain frozen at its post-warmup state without incremental drift."
+
+    # --- E. P1 exact periodic count ---
+    def test_e_p1_periodic_exact_frequency(self):
+        """Verify P1 triggers exactly n_stream // N_interval times."""
+        X, y, seg, warmup = _make_stream_inputs(n=95, warmup=20, seed=5)
+        n_stream = 75
+        n_interval = 15
+        runner = _make_runner("P1", n_interval=n_interval)
+        result = runner.run(X, y, seg, warmup_size=warmup)
+        assert result.n_adaptations == n_stream // n_interval
+
+    # --- F. P2 global drift causes global adaptation only ---
+    def test_f_p2_global_scope_only(self):
+        """Verify that P2 adaptations always have scope == 'global'."""
+        from tests.test_runner import TestRunnerP2
+        p2_fixture = TestRunnerP2()
+        X, y, seg, warmup = p2_fixture._abrupt_stream(warmup=20, n=1200)
+        runner = _make_runner("P2", detector="adwin")
+        result = runner.run(X, y, seg, warmup_size=warmup)
+        assert result.n_adaptations >= 1
+        for ev in result.adaptation_log:
+            assert ev["scope"] == "global", f"P2 adaptation scope must be 'global', got {ev['scope']}"
+
+    # --- G. P3 segment drift causes segment-scoped adaptation ---
+    def test_g_p3_segment_scope_only(self):
+        """Verify that P3 adaptations have scope matching the drifting segment."""
+        from tests.test_runner import TestRunnerP3
+        p3_fixture = TestRunnerP3()
+        X, y, seg, warmup = p3_fixture._build_segment_stream(n=1500, warmup=20)
+        runner = _make_runner("P3", detector="adwin")
+        result = runner.run(X, y, seg, warmup_size=warmup)
+        assert result.n_adaptations >= 1
+        for ev in result.adaptation_log:
+            assert ev["scope"] != "global", "P3 adaptation scope must be segment-specific."
+            assert ev["scope"] in ("W", "H")
+
+    # --- H. Segment isolation (Drift in A cannot silently adapt B) ---
+    def test_h_segment_isolation_drift_in_a_does_not_adapt_b(self):
+        """Verify that concept drift in segment 'A' does not trigger adaptation in segment 'B'."""
+        rows = []
+        n = 1500
+        warmup = 40
+        for i in range(n):
+            seg_val = "A" if i % 2 == 0 else "B"
+            if seg_val == "A":
+                # Segment A experiences extreme concept drift after midpoint
+                x1, x2 = 0.0, 0.0
+                label = 1 if i > n // 2 else 0
+            else:
+                # Segment B is completely stable: legitimate transactions throughout
+                x1, x2 = 10.0, 10.0
+                label = 0
+            rows.append({"x1": x1, "x2": x2, "segment": seg_val, "isFraud": label})
+
+        df = pd.DataFrame(rows)
+        X = df[["x1", "x2"]].copy()
+        y = df["isFraud"].copy()
+        seg_s = df["segment"].astype(str).copy()
+
+        runner = _make_runner("P3", detector="adwin")
+        result = runner.run(X, y, seg_s, warmup_size=warmup)
+
+        # Segment A must trigger adaptation
+        scopes = [ev["scope"] for ev in result.adaptation_log]
+        assert "A" in scopes, "Segment A must trigger adaptation upon drift."
+        # Segment B must NEVER trigger adaptation
+        assert "B" not in scopes, "Segment B must NEVER be adapted when drift is localized to A."
+
+        # Verify model isolation: B's dedicated model still predicts correctly for B
+        b_model = runner.segment_models["B"]
+        b_prob = b_model.predict_one({"x1": 10.0, "x2": 10.0})
+        assert b_prob == pytest.approx(0.0, abs=1e-5), "Segment B model state must be preserved."
+
+    # --- I. Reset isolation across independent runs ---
+    def test_i_reset_produces_independent_runs(self):
+        """Verify that two sequential runs on the same runner instance are completely independent."""
+        from src.models.base_learner import HoeffdingTreeLearner
+        runner = _make_runner("P1", n_interval=10)
+        X, y, seg, warmup = _make_stream_inputs(n=60, warmup=20, seed=7)
+
+        res1 = runner.run(X, y, seg, warmup_size=warmup)
+        # Reset with fresh learner
+        runner.reset(learner=HoeffdingTreeLearner(grace_period=5, delta=1e-3))
+        res2 = runner.run(X, y, seg, warmup_size=warmup)
+
+        assert res1.n_stream == res2.n_stream
+        assert res1.n_adaptations == res2.n_adaptations
+        expected_buf = min(len(res2.records) + warmup, runner._retrainer.window_size)
+        assert runner._retrainer.buffer_size == expected_buf
+
+    # --- J. Warmup counting and evaluation exclusion ---
+    def test_j_warmup_excluded_from_evaluation(self):
+        """Warmup observations must NOT be evaluated or included in stream records."""
+        X, y, seg, warmup = _make_stream_inputs(n=100, warmup=30, seed=12)
+        runner = _make_runner("P0")
+        result = runner.run(X, y, seg, warmup_size=warmup)
+
+        assert result.n_warmup == 30
+        assert result.n_stream == 70
+        assert len(result.records) == 70
+        assert result.records[0].tx_index == 30
+        assert result.records[-1].tx_index == 99
+        assert result.final_metrics.n_samples == 70

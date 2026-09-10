@@ -12,43 +12,53 @@ Strict Prequential Execution Order (per transaction t)
 Phase 1  WARMUP  (t = 0 … t_warmup − 1)
     ↓  Preprocessor already fitted externally on warmup data.
     ↓  Learner is trained on each warmup observation (learn_one).
-    ↓  Memory buffer is populated.
+    ↓  Per-segment learners trained on corresponding segment warmup samples (P3).
+    ↓  Memory buffer is populated with warmup observations.
     ↓  No metrics, no drift detection, no policy triggers.
 
 Phase 2  STREAM  (t = t_warmup … T − 1) — the prequential loop:
 
-  Step 1  PREDICT
+  Step 1  ACTIVE MODEL SELECTION
+          Select active model:
+          - P3: self._segment_models[seg_t] (if seg_t present, else global)
+          - P0, P1, P2: self._learner (global)
+
+  Step 2  PREDICT (strictly before y_t revelation)
           t_start = now()
-          ŷ_prob_t = model.predict_one(x_t)         ← uses model BEFORE y_t
+          ŷ_prob_t = active_model.predict_one(x_t)
           latency = now() − t_start
 
-  Step 2  METRIC PRE-REVEAL
+  Step 3  METRIC ACCUMULATION & LATENCY LOGGING
           metrics_tracker.update_latency(latency)
-          # NOTE: y_t not yet used — metric will be finalized in Step 3.
+          metrics_tracker.update(y_t, ŷ_prob_t)
 
-  Step 3  LABEL REVELATION & METRIC UPDATE
+  Step 4  LABEL REVELATION & ERROR SIGNAL
           y_t revealed from stream
-          metrics_tracker.update(y_t, ŷ_prob_t)    ← y_t now known
+          ŷ_pred_t = int(ŷ_prob_t >= 0.5)
+          e_t = |y_t − ŷ_pred_t| ∈ {0, 1}
 
-  Step 4  ONLINE LEARNER UPDATE
-          model.learn_one(x_t, y_t)                 ← incremental update
+  Step 5  CONCEPT DRIFT MONITOR UPDATE
+          drift_monitor.update(e_t, tx_index=t, segment_key=seg_t)
 
-  Step 5  MEMORY BUFFER UPDATE
-          retrainer.add(x_t, y_t, segment_key_t)
-
-  Step 6  DRIFT DETECTOR UPDATE
-          e_t = |y_t − round(ŷ_prob_t)|
-          drift_monitor.update(e_t, tx_index=t, segment_key=segment_key_t)
+  Step 6  MEMORY BUFFER UPDATE
+          retrainer.add(x_t, y_t, seg_t)
+          (Current sample enters W_adapt before adaptation evaluation)
 
   Step 7  POLICY TRIGGER EVALUATION
           new_model = policy_manager.step(
-              tx_index=t, current_model=model, segment_key=segment_key_t
+              tx_index=t, current_model=active_model, segment_key=seg_t
           )
 
-  Step 8  MODEL SWAP (if adaptation triggered)
+  Step 8  MODEL ADAPTATION SWAP vs. ONLINE UPDATE
           if new_model is not None:
-              model = new_model
-          → the NEW model is used from t+1 onward.
+              - P3 (segment scope): self._segment_models[seg_t] = new_model
+                (Only the affected sub-population model is replaced; all other
+                 segment models are completely untouched, preserving isolation).
+              - P1 / P2 (global scope): self._learner = new_model
+              (The retrained model has been fitted on W_adapt including (x_t, y_t)).
+          else:
+              - P1, P2, P3: active_model.learn_one(x_t, y_t)  (ordinary online update)
+              - P0 Static: NO update performed (model remains strictly frozen post-warmup).
 
   Advance to t+1.
 
@@ -60,14 +70,9 @@ Design constraints
 - All components are injected by the caller (learner, retrainer, monitor,
   policy_manager, metrics_tracker).  The runner does NOT construct them.
 - The runner is stateless between runs IF `reset()` is called.
-- Online learner ``learn_one`` is ALWAYS called on every streaming sample.
-  Policy-triggered ``retrain_window`` produces a NEW learner INSTANCE that
-  replaces the current one; it does NOT suppress incremental updates.
-- P3 retrains only the affected segment; the runner swaps the model
-  globally (the retrained segment model IS the new active model) so that
-  predictions for ALL future transactions use the segment-retrained model.
-  This is scientifically conservative: future Notebook 03 may extend to
-  per-segment model registries if E4 motivates it.
+- P0 Static baseline is strictly frozen post-warmup (zero learn_one updates).
+- P3 maintains independent per-segment learners. Restricting retraining to
+  the affected segment does NOT replace or degrade other segment models.
 """
 
 from __future__ import annotations
@@ -209,6 +214,10 @@ class RunResult:
             "latency_p95_s": self.latency_percentiles.get("p95"),
         }
 
+    def to_records_dataframe(self) -> pd.DataFrame:
+        """Convert per-transaction records to a pandas DataFrame for analysis/plotting."""
+        return pd.DataFrame([r.as_dict() for r in self.records])
+
 
 # ---------------------------------------------------------------------------
 # Policy name mapping: ExperimentConfig vocabulary → PolicyManager vocabulary
@@ -281,6 +290,7 @@ class PrequentialRunner:
         metrics_tracker: Any,
         policy_name: str = "P0",
         detector_type: str = "adwin",
+        learner_factory: Optional[Any] = None,
     ) -> None:
         self._learner = learner
         self._retrainer = retrainer
@@ -289,6 +299,24 @@ class PrequentialRunner:
         self._metrics = metrics_tracker
         self._policy_name = policy_name
         self._detector_type = detector_type
+        self._learner_factory = learner_factory or getattr(retrainer, "learner_factory", None)
+        # Dedicated per-segment model registry (active under P3)
+        self._segment_models: Dict[str, Any] = {}
+
+    @property
+    def segment_models(self) -> Dict[str, Any]:
+        """Dictionary of per-segment model instances (active under P3)."""
+        return self._segment_models
+
+    def _make_fresh_learner(self) -> Any:
+        """Instantiate a fresh learner via learner_factory or clone."""
+        if self._learner_factory is not None:
+            return self._learner_factory()
+        import copy
+        clone = copy.deepcopy(self._learner)
+        if hasattr(clone, "reset"):
+            clone.reset()
+        return clone
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -415,7 +443,9 @@ class PrequentialRunner:
         """Train learner and populate buffer on warmup observations.
 
         NO predictions, NO metric updates, NO drift detection during warmup.
+        For P3, also populates per-segment initial models.
         """
+        is_p3 = (self._policy_name == "P3")
         for i in range(warmup_size):
             x_i: Dict[str, Any] = {
                 col: X.iat[i, X.columns.get_loc(col)] for col in X.columns
@@ -424,8 +454,15 @@ class PrequentialRunner:
             seg_i: Optional[str] = (
                 str(segment.iat[i]) if segment is not None else None
             )
-            # Train learner
+            # Global learner always trained on warmup (baseline / fallback)
             self._learner.learn_one(x_i, y_i)
+
+            # For P3: populate per-segment learners during warmup
+            if is_p3 and seg_i is not None:
+                if seg_i not in self._segment_models:
+                    self._segment_models[seg_i] = self._make_fresh_learner()
+                self._segment_models[seg_i].learn_one(x_i, y_i)
+
             # Populate memory buffer (retrainer)
             self._retrainer.add(x_i, y_i, seg_i)
 
@@ -440,57 +477,69 @@ class PrequentialRunner:
         y_t: int,
         seg_t: Optional[str],
     ) -> StreamingRecord:
-        """Execute one full prequential step and return a StreamingRecord.
+        """Execute one full prequential step and return a StreamingRecord."""
+        is_p3 = (self._policy_name == "P3")
 
-        Steps 1–8 from the module docstring.
-        """
-        # --- Step 1: PREDICT (before y_t) ---
+        # --- Step 1: Active model resolution ---
+        if is_p3 and seg_t is not None:
+            if seg_t not in self._segment_models:
+                self._segment_models[seg_t] = self._make_fresh_learner()
+            active_model = self._segment_models[seg_t]
+        else:
+            active_model = self._learner
+
+        # --- Step 2: PREDICT (strictly before y_t revelation) ---
         t_infer_start = time.perf_counter()
-        y_prob_t: float = self._learner.predict_one(x_t)
+        y_prob_t: float = active_model.predict_one(x_t)
         latency_s = time.perf_counter() - t_infer_start
 
-        # --- Step 2: Record latency ---
+        # --- Step 3: Record latency & prequential prediction ---
         self._metrics.update_latency(latency_s)
-
-        # --- Step 3: Reveal label & update metrics ---
-        y_pred_t: int = int(y_prob_t >= 0.5)
         self._metrics.update(y_t, y_prob_t)
 
-        # Binary prediction error for drift detector
+        y_pred_t: int = int(y_prob_t >= 0.5)
+
+        # --- Step 4: True label revelation & error calculation ---
         error_t: int = abs(y_t - y_pred_t)
 
-        # --- Step 4: Online learner update ---
-        self._learner.learn_one(x_t, y_t)
-
-        # --- Step 5: Memory buffer update ---
-        self._retrainer.add(x_t, y_t, seg_t)
-
-        # --- Step 6: Drift detector update ---
+        # --- Step 5: Drift detector update ---
         self._monitor.update(error=error_t, tx_index=tx_index, segment_key=seg_t)
-
         global_drift = self._monitor.global_drift_detected
         segment_drift = (
             self._monitor.segment_drift_detected(seg_t)
             if seg_t is not None else False
         )
 
+        # --- Step 6: Memory buffer update (current sample enters W_adapt) ---
+        self._retrainer.add(x_t, y_t, seg_t)
+
         # --- Step 7: Policy trigger evaluation ---
         new_model = self._policy.step(
             tx_index=tx_index,
-            current_model=self._learner,
+            current_model=active_model,
             segment_key=seg_t,
         )
 
-        # --- Step 8: Model swap ---
+        # --- Step 8: Adaptation swap vs. ordinary online update ---
         adapted = False
         adaptation_scope: Optional[str] = None
         if new_model is not None:
-            self._learner = new_model
             adapted = True
-            # Infer scope from the last adaptation record
             log = self._policy.adaptation_log
             if log:
                 adaptation_scope = log[-1].scope
+
+            # Phase 8: Model State Swap
+            if is_p3 and seg_t is not None:
+                # Replace ONLY the affected segment's active model
+                self._segment_models[seg_t] = new_model
+            else:
+                # Replace the global active model
+                self._learner = new_model
+        else:
+            # Ordinary online learning update (P1, P2, P3 only; P0 is frozen post-warmup)
+            if self._policy_name != "P0":
+                active_model.learn_one(x_t, y_t)
 
         return StreamingRecord(
             tx_index=tx_index,
@@ -518,28 +567,14 @@ class PrequentialRunner:
         reset_policy: bool = True,
         reset_metrics: bool = True,
     ) -> None:
-        """Reset all injected components for a fresh independent run.
-
-        Parameters
-        ----------
-        learner:
-            If provided, replace the learner entirely (recommended for
-            multi-seed runs to get a fresh untrained model).  If ``None``,
-            calls ``self._learner.reset()`` if the method exists.
-        reset_monitor:
-            If ``True``, call ``drift_monitor.reset()``.
-        reset_retrainer:
-            If ``True``, call ``retrainer.reset()`` (clears memory buffer).
-        reset_policy:
-            If ``True``, call ``policy_manager.reset()`` (clears tx_counter
-            and adaptation log).
-        reset_metrics:
-            If ``True``, call ``metrics_tracker.reset()``.
-        """
+        """Reset all injected components for a fresh independent run."""
         if learner is not None:
             self._learner = learner
         elif hasattr(self._learner, "reset"):
             self._learner.reset()
+
+        if self._segment_models:
+            self._segment_models.clear()
 
         if reset_monitor:
             self._monitor.reset()
@@ -652,6 +687,7 @@ class PrequentialRunner:
             metrics_tracker=metrics,
             policy_name=policy_key,
             detector_type=detector_key,
+            learner_factory=_learner_factory,
         )
 
     # ------------------------------------------------------------------
