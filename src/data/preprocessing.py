@@ -185,7 +185,7 @@ class StreamingPreprocessor:
             segment_series = pd.Series(["all"] * len(df), index=df.index, dtype=str)
 
         # 3. Construct Feature Matrix X
-        X_df = pd.DataFrame(index=df.index)
+        feature_dict: Dict[str, Any] = {}
 
         # Process Numerical Features
         for col in self.numerical_cols:
@@ -199,11 +199,11 @@ class StreamingPreprocessor:
                     std_val = self.scaling_stds[col]
                     series = (series - mean_val) / std_val
 
-                X_df[col] = series
+                feature_dict[col] = series
             else:
                 # Missing column in input stream: fill with warmup median
                 default_val = self.imputation_medians[col]
-                X_df[col] = default_val
+                feature_dict[col] = default_val
 
         # Process Categorical Features
         for col in self.categorical_cols:
@@ -215,14 +215,18 @@ class StreamingPreprocessor:
                 mapped_series = series_str.map(mapping).fillna(0).astype(int)
                 # Ensure null inputs in original data map to 0
                 mapped_series[df[col].isna()] = 0
-                X_df[col] = mapped_series
+                feature_dict[col] = mapped_series
             else:
-                X_df[col] = 0
+                feature_dict[col] = 0
+
+        # Construct DataFrame in one go to prevent memory fragmentation
+        X_df = pd.DataFrame(feature_dict, index=df.index)
 
         # Enforce exact feature order established during fit
         X_df = X_df[self.feature_names]
 
         return X_df, y_target, segment_series
+
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize preprocessor state to dictionary for logging/reproducibility."""

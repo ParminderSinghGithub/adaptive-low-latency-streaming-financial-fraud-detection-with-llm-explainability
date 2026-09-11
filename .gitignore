@@ -177,7 +177,10 @@ outputs/figures/**/*.jpg
 outputs/figures/**/*.pdf
 outputs/tables/**/*.csv
 outputs/tables/**/*.tex
+outputs/tables/**/*.md
 outputs/metrics/**/*.json
+outputs/*.zip
+
 
 # internal docs
 docs/internal

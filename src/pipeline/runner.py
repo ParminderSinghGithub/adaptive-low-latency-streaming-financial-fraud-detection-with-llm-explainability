@@ -389,16 +389,19 @@ class PrequentialRunner:
             if segment is not None else None
         )
 
-        for local_idx in range(len(X_stream)):
+        col_names = X_stream.columns.tolist()
+        X_stream_arr = X_stream.to_numpy()
+        y_stream_arr = y_stream.to_numpy()
+        seg_stream_arr = seg_stream.to_numpy() if seg_stream is not None else None
+        n_stream = len(X_stream)
+
+        for local_idx in range(n_stream):
             tx_index = warmup_size + local_idx
 
-            x_t: Dict[str, Any] = {
-                col: X_stream.iat[local_idx, X_stream.columns.get_loc(col)]
-                for col in X_stream.columns
-            }
-            y_t: int = int(y_stream.iat[local_idx])
+            x_t: Dict[str, Any] = dict(zip(col_names, X_stream_arr[local_idx]))
+            y_t: int = int(y_stream_arr[local_idx])
             seg_t: Optional[str] = (
-                str(seg_stream.iat[local_idx]) if seg_stream is not None else None
+                str(seg_stream_arr[local_idx]) if seg_stream_arr is not None else None
             )
 
             record = self._step(
@@ -442,6 +445,18 @@ class PrequentialRunner:
         )
 
     # ------------------------------------------------------------------
+    # Reference extraction helper (for equivalence testing)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_row_reference(df: pd.DataFrame, idx: int) -> Dict[str, Any]:
+        """Reference extraction using pandas .iat for equivalence verification."""
+        return {
+            col: df.iat[idx, df.columns.get_loc(col)]
+            for col in df.columns
+        }
+
+    # ------------------------------------------------------------------
     # Warmup phase
     # ------------------------------------------------------------------
 
@@ -458,13 +473,19 @@ class PrequentialRunner:
         For P3, also populates per-segment initial models.
         """
         is_p3 = (self._policy_name == "P3")
+        X_warmup = X.iloc[:warmup_size]
+        col_names = X_warmup.columns.tolist()
+        X_warmup_arr = X_warmup.to_numpy()
+        y_warmup_arr = y.iloc[:warmup_size].to_numpy()
+        seg_warmup_arr = (
+            segment.iloc[:warmup_size].to_numpy() if segment is not None else None
+        )
+
         for i in range(warmup_size):
-            x_i: Dict[str, Any] = {
-                col: X.iat[i, X.columns.get_loc(col)] for col in X.columns
-            }
-            y_i: int = int(y.iat[i])
+            x_i: Dict[str, Any] = dict(zip(col_names, X_warmup_arr[i]))
+            y_i: int = int(y_warmup_arr[i])
             seg_i: Optional[str] = (
-                str(segment.iat[i]) if segment is not None else None
+                str(seg_warmup_arr[i]) if seg_warmup_arr is not None else None
             )
             # Global learner always trained on warmup (baseline / fallback)
             self._learner.learn_one(x_i, y_i)

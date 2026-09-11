@@ -57,8 +57,13 @@ def chronological_stream(
     The generator does NOT split warmup from stream.  That responsibility
     belongs to the caller (typically :class:`~src.pipeline.runner.PrequentialRunner`).
     """
-    for idx in X.index:
-        x_dict: Dict[str, Any] = {col: X.at[idx, col] for col in X.columns}
-        label: int = int(y.at[idx])
-        seg_key: Optional[str] = str(segment.at[idx]) if segment is not None else None
+    col_names = X.columns.tolist()
+    X_arr = X.to_numpy()
+    y_arr = y.to_numpy()
+    seg_arr = segment.to_numpy() if segment is not None else None
+
+    for i in range(len(X_arr)):
+        x_dict: Dict[str, Any] = dict(zip(col_names, X_arr[i]))
+        label: int = int(y_arr[i])
+        seg_key: Optional[str] = str(seg_arr[i]) if seg_arr is not None else None
         yield x_dict, label, seg_key
