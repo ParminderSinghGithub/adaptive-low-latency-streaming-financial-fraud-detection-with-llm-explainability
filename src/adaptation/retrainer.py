@@ -158,6 +158,34 @@ class RetrainingEngine:
             return self.retrain_window(segment_key=segment_key)
         return _fn
 
+    def get_window_stats(self, segment_key: Optional[str] = None) -> Dict[str, Any]:
+        """Return mechanism statistics for observations in the retraining window.
+
+        Parameters
+        ----------
+        segment_key:
+            If None, returns statistics across all buffered samples (for P1, P2).
+            If a segment string, returns statistics strictly for that segment (for P3).
+
+        Returns
+        -------
+        Dict with keys:
+            n_samples_window: int
+            n_fraud_window: int
+            fraud_prevalence_window: float (0.0 if n_samples_window == 0)
+            window_capacity: int (max capacity of the buffer)
+        """
+        rows = self._get_rows(segment_key)
+        n_samples = len(rows)
+        n_fraud = sum(1 for _, y, _ in rows if y == 1)
+        prevalence = (n_fraud / n_samples) if n_samples > 0 else 0.0
+        return {
+            "n_samples_window": n_samples,
+            "n_fraud_window": n_fraud,
+            "fraud_prevalence_window": round(prevalence, 6),
+            "window_capacity": self._window_size,
+        }
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------

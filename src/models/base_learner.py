@@ -161,8 +161,26 @@ class HoeffdingTreeLearner:
     def delta(self) -> float:
         return self._delta
 
+    @property
+    def model_complexity(self) -> Dict[str, Any]:
+        """Return tree structural complexity metrics for adaptation diagnostics.
+
+        Extracts summary metrics from River's HoeffdingTreeClassifier if available,
+        with graceful fallback across River versions.
+        """
+        complexity: Dict[str, Any] = {}
+        if hasattr(self._model, "summary") and isinstance(self._model.summary, dict):
+            complexity.update(self._model.summary)
+        else:
+            for attr in ("n_nodes", "height", "n_leaves", "n_active_leaves", "n_inactive_leaves", "n_branches"):
+                val = getattr(self._model, attr, None)
+                if val is not None:
+                    complexity[attr] = val
+        return complexity
+
     def __repr__(self) -> str:  # pragma: no cover
         return (
             f"HoeffdingTreeLearner(grace_period={self._grace_period}, "
             f"delta={self._delta})"
         )
+

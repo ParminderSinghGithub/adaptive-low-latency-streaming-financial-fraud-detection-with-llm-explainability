@@ -74,8 +74,21 @@ The thesis systematically investigates **model-update and retraining policies** 
 
 ---
 
-## 6. Publication Roadmap
+## 6. Publication Roadmap & Paper Architecture
 
-- **Paper 1 (Term 2 Target):** *Adaptive Retraining Policies for Streaming Financial Fraud Detection under Concept Drift* (Covering E1–E3, E5; Target: ECML-PKDD, ACM SAC, or IEEE TKDE).
-- **Paper 2 (Term 2 Target):** *Segment-Aware Adaptation for Localized Concept Drift in Streaming Fraud Detection* (Covering E4, E9, E10; Target: IEEE BigData, KDD Workshop, or CIKM).
-- **Paper 3 (Term 3 Target):** *Explainability of Adaptive Streaming Fraud Detection via SHAP and Grounded LLM Narrative Translation* (Covering E6, E7, E8; Target: ACM ICAIF or FAccT).
+- **Paper 1 (Core Policy Evaluation):**
+  - **Primary Objectives:** O1 (Natural stream benchmark, M1 $W \in \{5k, 10k, 20k\}$, M2 event diagnostics, M3 ablation), O2 (Controlled synthetic drift regimes E3), O5 (Operational trade-off analysis E6).
+  - **Supporting Robustness:** O4 / E5 (Detector sensitivity: ADWIN vs. HDDM; robustness/ablation, NOT standalone).
+  - **Optional Extensions:** E9 (Cross-dataset PaySim), E10 (ARF benchmark).
+  - **Target Venues:** IEEE ICDE, DSAA, ACM SAC.
+
+- **Paper 2 (Segment-Aware Localized Adaptation):**
+  - **Primary Objective:** O3 / E4 (Localized concept drift and segment-level adaptation efficiency vs. global retraining).
+  - **Supporting Components:** Localized portions of O2; relevant localized operational analysis from O5 / E6. *(Does not duplicate all of O2/O5).*
+  - **Target Venues:** IEEE ICAIF, ACM ICAIF.
+
+- **Paper 3 (Conditional Explainability):**
+  - **Primary Objective:** O6 / E7, E8 (Post-retraining SHAP feature-attribution stability and factual grounding of LLM risk narrative translation).
+  - **Condition:** Pursued only if empirical evidence establishes a meaningful scientific contribution.
+  - **Target Venues:** ACM ICAIF, ACM FAccT.
+

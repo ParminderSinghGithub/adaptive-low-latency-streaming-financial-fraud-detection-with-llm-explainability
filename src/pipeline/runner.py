@@ -297,6 +297,8 @@ class PrequentialRunner:
         detector_type: str = "adwin",
         learner_factory: Optional[Any] = None,
         p0_mode: str = "incremental",
+        diagnostic_horizon: int = 500,
+        no_swap: bool = False,
     ) -> None:
         self._learner = learner
         self._retrainer = retrainer
@@ -307,8 +309,23 @@ class PrequentialRunner:
         self._detector_type = detector_type
         self._learner_factory = learner_factory or getattr(retrainer, "learner_factory", None)
         self._p0_mode = p0_mode.lower()
+        self._diagnostic_horizon = diagnostic_horizon
+        self._no_swap = no_swap
+        if hasattr(self._policy, "_no_swap"):
+            self._policy._no_swap = no_swap
         # Dedicated per-segment model registry (active under P3)
         self._segment_models: Dict[str, Any] = {}
+        self._pending_diagnostics: List[Dict[str, Any]] = []
+
+    @property
+    def diagnostic_horizon(self) -> int:
+        """Diagnostic evaluation horizon H (in transactions) for M2 pre/post metrics."""
+        return self._diagnostic_horizon
+
+    @property
+    def no_swap(self) -> bool:
+        """Whether M3 Trigger/No-Swap ablation mode is active."""
+        return self._no_swap
 
     @property
     def p0_mode(self) -> str:
@@ -319,6 +336,23 @@ class PrequentialRunner:
     def segment_models(self) -> Dict[str, Any]:
         """Dictionary of per-segment model instances (active under P3)."""
         return self._segment_models
+
+    @staticmethod
+    def _compute_slice_ap(records_slice: List[StreamingRecord]) -> Tuple[Optional[float], int]:
+        """Compute Average Precision over a fixed horizon slice of recorded stream predictions."""
+        if not records_slice:
+            return None, 0
+        y_true = [r.y_true for r in records_slice]
+        y_prob = [r.y_prob for r in records_slice]
+        n = len(records_slice)
+        if sum(y_true) > 0:
+            try:
+                from sklearn.metrics import average_precision_score
+                ap = float(average_precision_score(y_true, y_prob))
+                return round(ap, 6), n
+            except Exception:
+                return None, n
+        return 0.0, n
 
     def _make_fresh_learner(self) -> Any:
         """Instantiate a fresh learner via learner_factory or clone."""
@@ -409,10 +443,42 @@ class PrequentialRunner:
                 x_t=x_t,
                 y_t=y_t,
                 seg_t=seg_t,
+                records=records,
             )
             records.append(record)
 
+            # Update pending forward-horizon diagnostics
+            if self._pending_diagnostics:
+                still_pending = []
+                for item in self._pending_diagnostics:
+                    rec = item["record"]
+                    start_idx = item["post_start_idx"]
+                    target_h = item["target_horizon"]
+                    available = len(records) - start_idx
+                    if available >= target_h:
+                        post_slice = records[start_idx : start_idx + target_h]
+                        post_ap, post_n = self._compute_slice_ap(post_slice)
+                        rec.post_ap = post_ap
+                        rec.post_horizon_n = post_n
+                        rec.delta_ap = round(post_ap - rec.pre_ap, 6) if (post_ap is not None and rec.pre_ap is not None) else None
+                        rec.horizon_complete = True
+                    else:
+                        still_pending.append(item)
+                self._pending_diagnostics = still_pending
+
         total_wall_time_s = time.perf_counter() - stream_start
+
+        # Finalize any pending diagnostics where stream finished before H observations
+        for item in self._pending_diagnostics:
+            rec = item["record"]
+            start_idx = item["post_start_idx"]
+            post_slice = records[start_idx : len(records)]
+            post_ap, post_n = self._compute_slice_ap(post_slice)
+            rec.post_ap = post_ap
+            rec.post_horizon_n = post_n
+            rec.delta_ap = round(post_ap - rec.pre_ap, 6) if (post_ap is not None and rec.pre_ap is not None) else None
+            rec.horizon_complete = False
+        self._pending_diagnostics.clear()
 
         # ----------------------------------------------------------------
         # Collect results
@@ -509,6 +575,7 @@ class PrequentialRunner:
         x_t: Dict[str, Any],
         y_t: int,
         seg_t: Optional[str],
+        records: Optional[List[StreamingRecord]] = None,
     ) -> StreamingRecord:
         """Execute one full prequential step and return a StreamingRecord."""
         is_p3 = (self._policy_name == "P3")
@@ -552,6 +619,12 @@ class PrequentialRunner:
         # --- Step 7: Memory buffer update (current sample enters W_adapt) ---
         self._retrainer.add(x_t, y_t, seg_t)
 
+        # Pre-trigger model complexity capture
+        comp_pre = getattr(active_model, "model_complexity", {})
+        if callable(comp_pre):
+            comp_pre = comp_pre()
+        model_complexity_pre = dict(comp_pre) if isinstance(comp_pre, dict) else {}
+
         # --- Step 8: Policy trigger evaluation ---
         new_model = self._policy.step(
             tx_index=tx_index,
@@ -563,18 +636,48 @@ class PrequentialRunner:
         adapted = False
         adaptation_scope: Optional[str] = None
         if new_model is not None:
-            adapted = True
             log = self._policy.adaptation_log
             if log:
-                adaptation_scope = log[-1].scope
+                rec = log[-1]
+                adaptation_scope = rec.scope
+                # Populate M2 window statistics (strictly segment-specific for P3)
+                if hasattr(self._retrainer, "get_window_stats"):
+                    stats = self._retrainer.get_window_stats(segment_key=seg_t if is_p3 else None)
+                    rec.window_size = stats.get("window_capacity")
+                    rec.n_samples_window = stats.get("n_samples_window")
+                    rec.n_fraud_window = stats.get("n_fraud_window")
+                    rec.fraud_prevalence_window = stats.get("fraud_prevalence_window")
+                rec.model_complexity_pre = model_complexity_pre
 
-            # Phase 8: Model State Swap
-            if is_p3 and seg_t is not None:
-                # Replace ONLY the affected segment's active model
-                self._segment_models[seg_t] = new_model
-            else:
-                # Replace the global active model
-                self._learner = new_model
+                # Pre-adaptation AP from already recorded predictions (strictly pre-adaptation)
+                history = records if records is not None else []
+                pre_start = max(0, len(history) - self._diagnostic_horizon)
+                pre_slice = history[pre_start : len(history)]
+                pre_ap, pre_n = self._compute_slice_ap(pre_slice)
+                rec.pre_ap = pre_ap
+                rec.pre_horizon_n = pre_n
+
+                if rec.replacement_performed:
+                    adapted = True
+                    if is_p3 and seg_t is not None:
+                        self._segment_models[seg_t] = new_model
+                    else:
+                        self._learner = new_model
+                    comp_post = getattr(new_model, "model_complexity", {})
+                    if callable(comp_post):
+                        comp_post = comp_post()
+                    rec.model_complexity_post = dict(comp_post) if isinstance(comp_post, dict) else {}
+                else:
+                    # M3 no-swap ablation: trigger observed, active model retained, replacement suppressed
+                    adapted = False
+                    rec.model_complexity_post = dict(model_complexity_pre)
+
+                # Queue forward horizon diagnostic tracking
+                self._pending_diagnostics.append({
+                    "record": rec,
+                    "post_start_idx": len(history) + 1,  # next record is the first post-adaptation observation
+                    "target_horizon": self._diagnostic_horizon,
+                })
 
         return StreamingRecord(
             tx_index=tx_index,
@@ -619,6 +722,7 @@ class PrequentialRunner:
             self._policy.reset()
         if reset_metrics:
             self._metrics.reset()
+        self._pending_diagnostics.clear()
 
     # ------------------------------------------------------------------
     # Convenience factory
@@ -637,40 +741,13 @@ class PrequentialRunner:
         segment_aware: bool = False,
         seed: Optional[int] = None,
         p0_mode: str = "incremental",
+        diagnostic_horizon: int = 500,
+        no_swap: bool = False,
     ) -> "PrequentialRunner":
         """Convenience factory that wires all components together.
 
         Intended for testing and notebook usage.  Production experiments
         should construct components explicitly for full control.
-
-        Parameters
-        ----------
-        policy_str:
-            Policy name (``"P0"``–``"P3"`` or config vocabulary like
-            ``"static"``, ``"periodic"``, etc.).
-        detector_str:
-            Detector name (``"adwin"``, ``"hddm_w"``, ``"hddm_a"``,
-            ``"hddm"`` as alias for ``"hddm_w"``).
-        grace_period:
-            Hoeffding Tree grace_period.
-        delta:
-            Hoeffding Tree Hoeffding bound delta (River 0.21+, formerly
-            ``split_confidence``).
-        window_size:
-            Retraining window size (N_window).
-        n_interval:
-            Periodic retraining interval for P1.
-        detector_kwargs:
-            Extra kwargs for the drift detector (e.g. ``{"delta": 0.002}``).
-        segment_aware:
-            Whether to enable per-segment drift monitoring (required for P3).
-        seed:
-            Random seed (currently informational; Hoeffding Tree is
-            deterministic given data order).
-
-        Returns
-        -------
-        A fully wired :class:`PrequentialRunner`.
         """
         from src.models.base_learner import HoeffdingTreeLearner
         from src.adaptation.retrainer import RetrainingEngine
@@ -712,6 +789,7 @@ class PrequentialRunner:
             drift_monitor=monitor,
             n_interval=n_interval,
             memory_buffer=None,  # retrainer owns buffer
+            no_swap=no_swap,
         )
         metrics = StreamingMetricsTracker(track_latency=True)
 
@@ -725,6 +803,8 @@ class PrequentialRunner:
             detector_type=detector_key,
             learner_factory=_learner_factory,
             p0_mode=p0_mode,
+            diagnostic_horizon=diagnostic_horizon,
+            no_swap=no_swap,
         )
 
     # ------------------------------------------------------------------
@@ -736,3 +816,8 @@ class PrequentialRunner:
             f"PrequentialRunner(policy={self._policy_name!r}, "
             f"detector={self._detector_type!r})"
         )
+
+
+# Alias for backward compatibility
+StreamingPipelineRunner = PrequentialRunner
+

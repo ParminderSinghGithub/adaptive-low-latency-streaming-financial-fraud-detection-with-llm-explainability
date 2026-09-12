@@ -57,9 +57,36 @@ class AdaptationRecord:
         Wall-clock seconds taken by ``retrain_fn``.
     trigger:
         Human-readable trigger description.
+    adaptation_event_index:
+        0-based index of this adaptation event within the run.
+    trigger_occurred:
+        Whether the adaptation policy trigger condition fired (True).
+    replacement_performed:
+        Whether model replacement was actually performed (True normally, False under M3 no_swap).
     """
 
-    __slots__ = ("policy", "tx_index", "scope", "duration_s", "trigger")
+    __slots__ = (
+        "policy",
+        "tx_index",
+        "scope",
+        "duration_s",
+        "trigger",
+        "adaptation_event_index",
+        "trigger_occurred",
+        "replacement_performed",
+        "window_size",
+        "n_samples_window",
+        "n_fraud_window",
+        "fraud_prevalence_window",
+        "model_complexity_pre",
+        "model_complexity_post",
+        "pre_ap",
+        "post_ap",
+        "delta_ap",
+        "pre_horizon_n",
+        "post_horizon_n",
+        "horizon_complete",
+    )
 
     def __init__(
         self,
@@ -68,12 +95,42 @@ class AdaptationRecord:
         scope: str,
         duration_s: float,
         trigger: str,
+        adaptation_event_index: int = 0,
+        trigger_occurred: bool = True,
+        replacement_performed: bool = True,
+        window_size: Optional[int] = None,
+        n_samples_window: Optional[int] = None,
+        n_fraud_window: Optional[int] = None,
+        fraud_prevalence_window: Optional[float] = None,
+        model_complexity_pre: Optional[Dict[str, Any]] = None,
+        model_complexity_post: Optional[Dict[str, Any]] = None,
+        pre_ap: Optional[float] = None,
+        post_ap: Optional[float] = None,
+        delta_ap: Optional[float] = None,
+        pre_horizon_n: int = 0,
+        post_horizon_n: int = 0,
+        horizon_complete: bool = False,
     ) -> None:
         self.policy = policy
         self.tx_index = tx_index
         self.scope = scope
         self.duration_s = duration_s
         self.trigger = trigger
+        self.adaptation_event_index = adaptation_event_index
+        self.trigger_occurred = trigger_occurred
+        self.replacement_performed = replacement_performed
+        self.window_size = window_size
+        self.n_samples_window = n_samples_window
+        self.n_fraud_window = n_fraud_window
+        self.fraud_prevalence_window = fraud_prevalence_window
+        self.model_complexity_pre = model_complexity_pre or {}
+        self.model_complexity_post = model_complexity_post or {}
+        self.pre_ap = pre_ap
+        self.post_ap = post_ap
+        self.delta_ap = delta_ap
+        self.pre_horizon_n = pre_horizon_n
+        self.post_horizon_n = post_horizon_n
+        self.horizon_complete = horizon_complete
 
     def as_dict(self) -> Dict[str, Any]:
         """Serialise to plain dict (e.g. for JSON logging)."""
@@ -83,12 +140,28 @@ class AdaptationRecord:
             "scope": self.scope,
             "duration_s": self.duration_s,
             "trigger": self.trigger,
+            "adaptation_event_index": self.adaptation_event_index,
+            "trigger_occurred": self.trigger_occurred,
+            "replacement_performed": self.replacement_performed,
+            "window_size": self.window_size,
+            "n_samples_window": self.n_samples_window,
+            "n_fraud_window": self.n_fraud_window,
+            "fraud_prevalence_window": self.fraud_prevalence_window,
+            "model_complexity_pre": self.model_complexity_pre,
+            "model_complexity_post": self.model_complexity_post,
+            "pre_ap": self.pre_ap,
+            "post_ap": self.post_ap,
+            "delta_ap": self.delta_ap,
+            "pre_horizon_n": self.pre_horizon_n,
+            "post_horizon_n": self.post_horizon_n,
+            "horizon_complete": self.horizon_complete,
         }
 
     def __repr__(self) -> str:  # pragma: no cover
         return (
             f"AdaptationRecord(policy={self.policy!r}, tx_index={self.tx_index}, "
-            f"scope={self.scope!r}, duration_s={self.duration_s:.4f})"
+            f"scope={self.scope!r}, duration_s={self.duration_s:.4f}, "
+            f"replaced={self.replacement_performed})"
         )
 
 
@@ -153,6 +226,7 @@ class PolicyManager:
         drift_monitor: DriftMonitor,
         n_interval: int = 10_000,
         memory_buffer: Optional[Any] = None,
+        no_swap: bool = False,
     ) -> None:
         policy = policy.upper()
         if policy not in self._VALID_POLICIES:
@@ -165,6 +239,7 @@ class PolicyManager:
         self._monitor = drift_monitor
         self._n_interval = n_interval
         self._memory_buffer = memory_buffer
+        self._no_swap = no_swap
 
         # Internal state
         self._tx_counter: int = 0          # global transaction counter
@@ -190,28 +265,27 @@ class PolicyManager:
         tx_index:
             0-based index of the current transaction in the stream.
         current_model:
-            The model currently in production.  Returned unchanged when no
-            adaptation occurs.  Only used to preserve identity; not inspected.
+            The model currently in production.
         segment_key:
             Categorical segment value of this transaction (e.g. ``"W"``).
-            Required for P3 trigger evaluation; harmlessly ignored by
-            P0, P1, P2.
 
         Returns
         -------
-        The new model returned by ``retrain_fn`` if adaptation was triggered,
-        ``None`` if no adaptation occurred.
+        - If trigger condition fires and no_swap=False: the new model returned by ``retrain_fn``.
+        - If trigger condition fires and no_swap=True (M3 ablation): ``current_model`` is returned
+          (trigger is logged, active model is retained, replacement is suppressed).
+        - If no adaptation trigger fired: ``None``.
         """
         self._tx_counter += 1
 
         if self._policy == "P0":
             return self._step_p0()
         elif self._policy == "P1":
-            return self._step_p1(tx_index)
+            return self._step_p1(tx_index, current_model=current_model)
         elif self._policy == "P2":
-            return self._step_p2(tx_index)
+            return self._step_p2(tx_index, current_model=current_model)
         elif self._policy == "P3":
-            return self._step_p3(tx_index, segment_key)
+            return self._step_p3(tx_index, segment_key, current_model=current_model)
         return None  # unreachable
 
     # ------------------------------------------------------------------
@@ -222,39 +296,32 @@ class PolicyManager:
         """P0 Static — never triggers adaptation."""
         return None
 
-    def _step_p1(self, tx_index: int) -> Optional[Any]:
-        """P1 Periodic — retrain every N_interval transactions (global scope).
-
-        Trigger condition: ``tx_counter % N_interval == 0`` (1-indexed so
-        the very first transaction does not trigger immediately).
-        """
+    def _step_p1(self, tx_index: int, current_model: Optional[Any] = None) -> Optional[Any]:
+        """P1 Periodic — retrain every N_interval transactions (global scope)."""
         if self._tx_counter % self._n_interval == 0:
             return self._do_retrain(
                 tx_index=tx_index,
                 scope="global",
                 trigger=f"P1:periodic:every_{self._n_interval}_tx",
+                current_model=current_model,
             )
         return None
 
-    def _step_p2(self, tx_index: int) -> Optional[Any]:
+    def _step_p2(self, tx_index: int, current_model: Optional[Any] = None) -> Optional[Any]:
         """P2 Global Drift — retrain when the global drift detector fires."""
         if self._monitor.global_drift_detected:
             return self._do_retrain(
                 tx_index=tx_index,
                 scope="global",
                 trigger="P2:global_drift_detected",
+                current_model=current_model,
             )
         return None
 
     def _step_p3(
-        self, tx_index: int, segment_key: Optional[str]
+        self, tx_index: int, segment_key: Optional[str], current_model: Optional[Any] = None
     ) -> Optional[Any]:
-        """P3 Segment Drift — retrain only the segment whose detector fired.
-
-        If ``segment_key`` is ``None`` the call is a no-op.  This can happen
-        during warmup rows that do not carry a segment label; P3 will simply
-        not trigger for those rows.
-        """
+        """P3 Segment Drift — retrain only the segment whose detector fired."""
         if segment_key is None:
             return None
         if self._monitor.segment_drift_detected(segment_key):
@@ -263,6 +330,7 @@ class PolicyManager:
                 scope=segment_key,
                 trigger=f"P3:segment_drift:{segment_key}",
                 segment_key=segment_key,
+                current_model=current_model,
             )
         return None
 
@@ -276,21 +344,27 @@ class PolicyManager:
         scope: str,
         trigger: str,
         segment_key: Optional[str] = None,
+        current_model: Optional[Any] = None,
     ) -> Any:
-        """Invoke ``retrain_fn``, record the event, and return the new model.
+        """Record the trigger and execute retraining (or suppress replacement under no_swap)."""
+        event_idx = len(self._adaptation_log)
+        if self._no_swap:
+            # M3 Trigger/No-Swap Ablation:
+            # Trigger is evaluated and logged; retraining/replacement is suppressed.
+            # The active model is retained and returned unchanged.
+            record = AdaptationRecord(
+                policy=self._policy,
+                tx_index=tx_index,
+                scope=scope,
+                duration_s=0.0,
+                trigger=trigger,
+                adaptation_event_index=event_idx,
+                trigger_occurred=True,
+                replacement_performed=False,
+            )
+            self._adaptation_log.append(record)
+            return current_model
 
-        Parameters
-        ----------
-        tx_index:
-            Stream position of the triggering transaction.
-        scope:
-            ``"global"`` or the segment key string.
-        trigger:
-            Human-readable trigger label for logging.
-        segment_key:
-            Forwarded to ``retrain_fn`` for segment-filtered retraining (P3).
-            ``None`` for global retrains (P1, P2).
-        """
         t_start = time.perf_counter()
         new_model = self._retrain_fn(
             self._memory_buffer, segment_key=segment_key
@@ -303,6 +377,9 @@ class PolicyManager:
             scope=scope,
             duration_s=duration_s,
             trigger=trigger,
+            adaptation_event_index=event_idx,
+            trigger_occurred=True,
+            replacement_performed=True,
         )
         self._adaptation_log.append(record)
         return new_model
@@ -310,6 +387,11 @@ class PolicyManager:
     # ------------------------------------------------------------------
     # Inspection API
     # ------------------------------------------------------------------
+
+    @property
+    def no_swap(self) -> bool:
+        """Whether M3 Trigger/No-Swap ablation mode is enabled."""
+        return self._no_swap
 
     @property
     def policy(self) -> str:

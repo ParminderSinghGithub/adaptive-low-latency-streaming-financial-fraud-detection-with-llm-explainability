@@ -50,6 +50,8 @@ class JobRecord:
     throughput_tx_per_sec: Optional[float] = None
     artifact_path: Optional[str] = None
     error_message: Optional[str] = None
+    window_size: Optional[int] = None
+    no_swap: bool = False
 
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -121,8 +123,35 @@ class ExperimentManifest:
         self.jobs: Dict[str, JobRecord] = {}
         self.load()
 
-    def make_job_id(self, policy: str, seed: int) -> str:
-        return f"{self.dataset_name}_{self.experiment_name}_{policy}_seed{seed}"
+    @staticmethod
+    def _get_artifact_filename(
+        policy: str,
+        seed: int,
+        window_size: Optional[int] = None,
+        no_swap: bool = False,
+    ) -> str:
+        parts = [f"run_{policy}"]
+        if window_size is not None and window_size != 5000:
+            parts.append(f"W{window_size}")
+        if no_swap:
+            parts.append("noswap")
+        parts.append(f"seed{seed}.json")
+        return "_".join(parts)
+
+    def make_job_id(
+        self,
+        policy: str,
+        seed: int,
+        window_size: Optional[int] = None,
+        no_swap: bool = False,
+    ) -> str:
+        parts = [self.dataset_name, self.experiment_name, policy]
+        if window_size is not None and window_size != 5000:
+            parts.append(f"W{window_size}")
+        if no_swap:
+            parts.append("noswap")
+        parts.append(f"seed{seed}")
+        return "_".join(parts)
 
     def load(self) -> None:
         """Load manifest from disk if it exists."""
@@ -175,34 +204,59 @@ class ExperimentManifest:
                 except OSError:
                     pass
 
-    def is_job_completed(self, policy: str, seed: int) -> bool:
+    def is_job_completed(
+        self,
+        policy: str,
+        seed: int,
+        window_size: Optional[int] = None,
+        no_swap: bool = False,
+    ) -> bool:
         """Check if job is marked COMPLETED and artifact exists and is valid."""
-        job_id = self.make_job_id(policy, seed)
+        job_id = self.make_job_id(policy, seed, window_size=window_size, no_swap=no_swap)
         job = self.jobs.get(job_id)
-        if not job or job.status != "COMPLETED" or not job.artifact_path:
-            # Also check if artifact file exists on disk independently
-            expected_file = self.artifacts_dir / f"run_{policy}_seed{seed}.json"
-            if validate_run_artifact(expected_file):
-                # Recover job record from artifact
-                self._recover_job_from_artifact(job_id, policy, seed, expected_file)
+        if job and job.status == "COMPLETED" and job.artifact_path:
+            p = Path(job.artifact_path)
+            if validate_run_artifact(p):
                 return True
-            return False
 
-        p = Path(job.artifact_path)
-        if validate_run_artifact(p):
+        # Check expected file on disk
+        expected_fn = self._get_artifact_filename(policy, seed, window_size=window_size, no_swap=no_swap)
+        expected_file = self.artifacts_dir / expected_fn
+        if validate_run_artifact(expected_file):
+            self._recover_job_from_artifact(job_id, policy, seed, expected_file, window_size=window_size, no_swap=no_swap)
             return True
 
-        # Artifact missing or invalid
-        job.status = "PENDING"
-        self.save()
+        # Legacy alias check for historical W=5000 or un-annotated baseline
+        if (window_size is None or window_size == 5000) and not no_swap:
+            legacy_id = f"{self.dataset_name}_{self.experiment_name}_{policy}_seed{seed}"
+            legacy_job = self.jobs.get(legacy_id)
+            if legacy_job and legacy_job.status == "COMPLETED" and legacy_job.artifact_path:
+                p = Path(legacy_job.artifact_path)
+                if validate_run_artifact(p):
+                    return True
+            legacy_file = self.artifacts_dir / f"run_{policy}_seed{seed}.json"
+            if validate_run_artifact(legacy_file):
+                self._recover_job_from_artifact(legacy_id, policy, seed, legacy_file, window_size=5000, no_swap=False)
+                return True
+
         return False
 
-    def _recover_job_from_artifact(self, job_id: str, policy: str, seed: int, file_path: Path) -> None:
+    def _recover_job_from_artifact(
+        self,
+        job_id: str,
+        policy: str,
+        seed: int,
+        file_path: Path,
+        window_size: Optional[int] = None,
+        no_swap: bool = False,
+    ) -> None:
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 d = json.load(f)
             fm = d.get("final_metrics", {})
             lp = d.get("latency_percentiles", {})
+            rec_w = d.get("window_size", window_size)
+            rec_ns = d.get("no_swap", no_swap)
             self.jobs[job_id] = JobRecord(
                 job_id=job_id,
                 experiment=self.experiment_name,
@@ -224,14 +278,23 @@ class ExperimentManifest:
                 latency_p99_ms=lp.get("p99_ms"),
                 throughput_tx_per_sec=d.get("throughput_tx_per_sec"),
                 artifact_path=str(file_path),
+                window_size=rec_w,
+                no_swap=rec_ns,
             )
             self.save()
         except Exception:
             pass
 
-    def record_start(self, policy: str, seed: int, dataset_fingerprint: Optional[str] = None) -> str:
+    def record_start(
+        self,
+        policy: str,
+        seed: int,
+        dataset_fingerprint: Optional[str] = None,
+        window_size: Optional[int] = None,
+        no_swap: bool = False,
+    ) -> str:
         """Mark job as RUNNING."""
-        job_id = self.make_job_id(policy, seed)
+        job_id = self.make_job_id(policy, seed, window_size=window_size, no_swap=no_swap)
         self.jobs[job_id] = JobRecord(
             job_id=job_id,
             experiment=self.experiment_name,
@@ -241,6 +304,8 @@ class ExperimentManifest:
             status="RUNNING",
             start_time=_utc_now_str(),
             dataset_fingerprint=dataset_fingerprint,
+            window_size=window_size,
+            no_swap=no_swap,
         )
         self.save()
         return job_id
@@ -255,9 +320,11 @@ class ExperimentManifest:
         code_version: Optional[str] = None,
         config_snapshot: Optional[Dict[str, Any]] = None,
         trajectories: Optional[Dict[str, Any]] = None,
+        window_size: Optional[int] = None,
+        no_swap: bool = False,
     ) -> Path:
         """Atomically persist run artifact and update manifest."""
-        job_id = self.make_job_id(policy, seed)
+        job_id = self.make_job_id(policy, seed, window_size=window_size, no_swap=no_swap)
         start_time = self.jobs[job_id].start_time if job_id in self.jobs else _utc_now_str()
         end_time = _utc_now_str()
 
@@ -281,7 +348,6 @@ class ExperimentManifest:
         latency_pcts["p95_ms"] = round(p95_val, 4)
         latency_pcts["p99_ms"] = round(p99_val, 4)
 
-
         n_stream = run_result.n_stream
         throughput = n_stream / wall_clock_duration_s if wall_clock_duration_s > 0 else 0.0
 
@@ -291,6 +357,8 @@ class ExperimentManifest:
             "dataset": self.dataset_name,
             "policy": policy,
             "seed": seed,
+            "window_size": window_size,
+            "no_swap": no_swap,
             "start_time": start_time,
             "end_time": end_time,
             "wall_clock_duration_s": round(wall_clock_duration_s, 3),
@@ -309,7 +377,8 @@ class ExperimentManifest:
             "trajectories": trajectories or {},
         }
 
-        artifact_path = self.artifacts_dir / f"run_{policy}_seed{seed}.json"
+        artifact_fn = self._get_artifact_filename(policy, seed, window_size=window_size, no_swap=no_swap)
+        artifact_path = self.artifacts_dir / artifact_fn
         atomic_write_json(artifact_data, artifact_path, indent=2)
 
         # Validate before marking complete
@@ -337,13 +406,22 @@ class ExperimentManifest:
             latency_p99_ms=latency_pcts.get("p99_ms"),
             throughput_tx_per_sec=round(throughput, 2),
             artifact_path=str(artifact_path),
+            window_size=window_size,
+            no_swap=no_swap,
         )
         self.save()
         return artifact_path
 
-    def record_failure(self, policy: str, seed: int, error_message: str) -> None:
+    def record_failure(
+        self,
+        policy: str,
+        seed: int,
+        error_message: str,
+        window_size: Optional[int] = None,
+        no_swap: bool = False,
+    ) -> None:
         """Record job failure."""
-        job_id = self.make_job_id(policy, seed)
+        job_id = self.make_job_id(policy, seed, window_size=window_size, no_swap=no_swap)
         start_time = self.jobs[job_id].start_time if job_id in self.jobs else _utc_now_str()
         self.jobs[job_id] = JobRecord(
             job_id=job_id,
@@ -355,6 +433,8 @@ class ExperimentManifest:
             start_time=start_time,
             end_time=_utc_now_str(),
             error_message=error_message,
+            window_size=window_size,
+            no_swap=no_swap,
         )
         self.save()
 
