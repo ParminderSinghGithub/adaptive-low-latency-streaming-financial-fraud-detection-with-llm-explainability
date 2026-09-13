@@ -358,3 +358,97 @@ class TestHorizonEdgeCasesAndPolicySemantics:
         assert len(res.adaptation_log) == 0
         assert res.n_adaptations == 0
 
+    def test_p0_runner_window_size_none_instantiation(self):
+        """Verify P0 instantiates without RetrainingEngine when window_size is None."""
+        runner = PrequentialRunner.from_config(
+            policy_str="P0",
+            detector_str="adwin",
+            window_size=None,
+        )
+        assert runner._retrainer is None
+        assert runner._policy._policy == "P0"
+        assert runner.policy_name == "P0"
+
+    def test_p0_execution_and_canonical_manifest_schema(self, tmp_path):
+        """Verify P0 generates valid canonical schema with window_size=None and adaptation_count=0."""
+        import json
+        manifest_p = tmp_path / "manifest.json"
+        artifacts_p = tmp_path / "artifacts"
+        manifest = ExperimentManifest(
+            manifest_path=manifest_p,
+            artifacts_dir=artifacts_p,
+            experiment_name="Objective1_E1_E2",
+            dataset_name="IEEE-CIS",
+        )
+
+        n_rows = 100
+        df_x = pd.DataFrame({"f1": np.linspace(0, 1, n_rows), "f2": np.random.randn(n_rows)})
+        y = pd.Series([0] * 80 + [1] * 20)
+
+        runner = PrequentialRunner.from_config(
+            policy_str="P0",
+            detector_str="adwin",
+            window_size=None,
+            seed=42,
+        )
+        res = runner.run(X=df_x, y=y, segment=None, warmup_size=20)
+        assert res.n_adaptations == 0
+        assert len(res.adaptation_log) == 0
+
+        art_path = manifest.record_completion(
+            policy="P0",
+            seed=42,
+            run_result=res,
+            wall_clock_duration_s=1.23,
+            dataset_fingerprint="test_fp",
+            code_version="authoritative_o1_v3_m1_m2_m3",
+            config_snapshot={"warmup_size": 20, "stream_size": 80, "window_size": None},
+            window_size=None,
+            no_swap=False,
+        )
+
+        assert art_path.name == "run_P0_seed42.json"
+        with open(art_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        assert data["job_id"] == "IEEE-CIS_Objective1_E1_E2_P0_seed42"
+        assert data["policy"] == "P0"
+        assert data["seed"] == 42
+        assert data["window_size"] is None
+        assert data["no_swap"] is False
+        assert data["adaptation_count"] == 0
+        assert data["adaptation_log"] == []
+        assert "pr_auc" in data["final_metrics"]
+        assert "roc_auc" in data["final_metrics"]
+        assert "latency_percentiles" in data
+
+        # Test manifest recovery
+        fresh_manifest = ExperimentManifest(
+            manifest_path=manifest_p,
+            artifacts_dir=artifacts_p,
+            experiment_name="Objective1_E1_E2",
+            dataset_name="IEEE-CIS",
+        )
+        assert fresh_manifest.is_job_completed("P0", seed=42, window_size=None) is True
+        job_rec = fresh_manifest.jobs["IEEE-CIS_Objective1_E1_E2_P0_seed42"]
+        assert job_rec.adaptation_count == 0
+        assert job_rec.window_size is None
+
+    def test_p0_unconditional_incremental_learning(self):
+        """Verify that P0 actively updates learner state on each transaction."""
+        n_rows = 60
+        df_x = pd.DataFrame({"f1": [0.1 * i for i in range(n_rows)]})
+        y = pd.Series([0] * 30 + [1] * 30)
+
+        runner = PrequentialRunner.from_config(
+            policy_str="P0",
+            detector_str="none",
+            window_size=None,
+            p0_mode="incremental",
+        )
+        res = runner.run(X=df_x, y=y, segment=None, warmup_size=10)
+        # Verify predictions were made and metrics accumulated
+        assert len(res.records) == 50
+        assert res.final_metrics.n_samples == 50
+        assert res.n_adaptations == 0
+

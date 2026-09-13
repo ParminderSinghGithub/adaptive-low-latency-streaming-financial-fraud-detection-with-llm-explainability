@@ -307,7 +307,7 @@ class PrequentialRunner:
         self._metrics = metrics_tracker
         self._policy_name = policy_name
         self._detector_type = detector_type
-        self._learner_factory = learner_factory or getattr(retrainer, "learner_factory", None)
+        self._learner_factory = learner_factory or (getattr(retrainer, "learner_factory", None) if retrainer is not None else None)
         self._p0_mode = p0_mode.lower()
         self._diagnostic_horizon = diagnostic_horizon
         self._no_swap = no_swap
@@ -316,6 +316,11 @@ class PrequentialRunner:
         # Dedicated per-segment model registry (active under P3)
         self._segment_models: Dict[str, Any] = {}
         self._pending_diagnostics: List[Dict[str, Any]] = []
+
+    @property
+    def policy_name(self) -> str:
+        """Name of the active adaptation policy."""
+        return self._policy_name
 
     @property
     def diagnostic_horizon(self) -> int:
@@ -562,8 +567,9 @@ class PrequentialRunner:
                     self._segment_models[seg_i] = self._make_fresh_learner()
                 self._segment_models[seg_i].learn_one(x_i, y_i)
 
-            # Populate memory buffer (retrainer)
-            self._retrainer.add(x_i, y_i, seg_i)
+            # Populate memory buffer (retrainer) if active
+            if self._retrainer is not None:
+                self._retrainer.add(x_i, y_i, seg_i)
 
     # ------------------------------------------------------------------
     # Single prequential step
@@ -617,7 +623,8 @@ class PrequentialRunner:
         )
 
         # --- Step 7: Memory buffer update (current sample enters W_adapt) ---
-        self._retrainer.add(x_t, y_t, seg_t)
+        if self._retrainer is not None:
+            self._retrainer.add(x_t, y_t, seg_t)
 
         # Pre-trigger model complexity capture
         comp_pre = getattr(active_model, "model_complexity", {})
@@ -716,7 +723,7 @@ class PrequentialRunner:
 
         if reset_monitor:
             self._monitor.reset()
-        if reset_retrainer:
+        if reset_retrainer and self._retrainer is not None:
             self._retrainer.reset()
         if reset_policy:
             self._policy.reset()
@@ -735,7 +742,7 @@ class PrequentialRunner:
         detector_str: str,
         grace_period: int = 200,
         delta: float = 1e-7,
-        window_size: int = 5_000,
+        window_size: Optional[int] = 5_000,
         n_interval: int = 10_000,
         detector_kwargs: Optional[Dict[str, Any]] = None,
         segment_aware: bool = False,
@@ -774,10 +781,16 @@ class PrequentialRunner:
             )
 
         learner = _learner_factory()
-        retrainer = RetrainingEngine(
-            learner_factory=_learner_factory,
-            window_size=window_size,
-        )
+
+        # P0 incremental-only baseline has no retraining window
+        if policy_key == "P0" and window_size is None:
+            retrainer = None
+        else:
+            retrainer = RetrainingEngine(
+                learner_factory=_learner_factory,
+                window_size=window_size if window_size is not None else 5_000,
+            )
+
         monitor = DriftMonitor(
             detector_type=detector_key,
             segment_aware=segment_aware or (policy_key == "P3"),
@@ -785,7 +798,7 @@ class PrequentialRunner:
         )
         policy = PolicyManager(
             policy=policy_key,
-            retrain_fn=retrainer.as_retrain_fn(),
+            retrain_fn=retrainer.as_retrain_fn() if retrainer is not None else None,
             drift_monitor=monitor,
             n_interval=n_interval,
             memory_buffer=None,  # retrainer owns buffer

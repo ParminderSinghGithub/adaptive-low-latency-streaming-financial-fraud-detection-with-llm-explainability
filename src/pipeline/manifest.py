@@ -236,7 +236,7 @@ class ExperimentManifest:
                     return True
             legacy_file = self.artifacts_dir / f"run_{policy}_seed{seed}.json"
             if validate_run_artifact(legacy_file):
-                self._recover_job_from_artifact(legacy_id, policy, seed, legacy_file, window_size=5000, no_swap=False)
+                self._recover_job_from_artifact(legacy_id, policy, seed, legacy_file, window_size=None if policy == "P0" else 5000, no_swap=False)
                 return True
 
         return False
