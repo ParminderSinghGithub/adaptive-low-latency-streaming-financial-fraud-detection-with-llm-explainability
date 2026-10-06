@@ -453,3 +453,91 @@ def test_scientific_validation_properties():
     s1_gradual = [SyntheticDriftInjector(E3DriftConfig(regime=DriftRegime.GRADUAL, t_drift=10, transition_width=50, seed=42)).evaluate_drift_state(i).is_affected for i in range(10, 60)]
     s2_gradual = [SyntheticDriftInjector(E3DriftConfig(regime=DriftRegime.GRADUAL, t_drift=10, transition_width=50, seed=101)).evaluate_drift_state(i).is_affected for i in range(10, 60)]
     assert s1_gradual != s2_gradual  # Genuine stochastic divergence across seeds
+
+
+def test_e3_experiment_manifest_lifecycle(tmp_path):
+    """Test E3ExperimentManifest lifecycle: job ID, start, completion, disk recovery, and summary."""
+    from src.pipeline.manifest import E3ExperimentManifest, validate_e3_run_artifact
+
+    manifest_path = tmp_path / "manifest.json"
+    artifacts_dir = tmp_path / "artifacts"
+    zip_path = tmp_path / "archive.zip"
+
+    manifest = E3ExperimentManifest(
+        manifest_path=manifest_path,
+        artifacts_dir=artifacts_dir,
+        zip_archive_path=zip_path,
+    )
+
+    job_id = manifest.make_job_id("P3", "localized", 42, window_size=10000)
+    assert job_id == "e3_P3_localized_W10000_seed42"
+    assert not manifest.is_job_completed("P3", "localized", 42, window_size=10000)
+
+    # Record start
+    manifest.record_start("P3", "localized", 42, window_size=10000)
+    assert manifest.jobs[job_id].status == "RUNNING"
+
+    # Mock RunResult, EventMetrics, and DriftConfig
+    class MockMetrics:
+        def as_dict(self):
+            return {"pr_auc": 0.85, "roc_auc": 0.92}
+
+    class MockLatencies:
+        def as_dict(self):
+            return {"p50_ms": 0.05, "p95_ms": 0.12}
+
+    class MockRunResult:
+        n_warmup = 100
+        n_stream = 900
+        final_metrics = MockMetrics()
+        latency_percentiles = MockLatencies()
+        adaptation_log = []
+        drift_event_log = []
+
+    class MockEventMetrics:
+        def as_dict(self):
+            return {
+                "regime": "localized",
+                "t_drift": 300,
+                "horizon": 200,
+                "pre_drift_pr_auc": 0.88,
+                "post_drift_pr_auc": 0.72,
+                "delta_pr_auc": -0.16,
+                "degradation_slope": -0.001,
+                "detection_delay": 15,
+                "false_alarms_before_drift": 0,
+                "recovery_time": 50,
+            }
+
+    drift_cfg = E3DriftConfig(regime=DriftRegime.LOCALIZED, t_drift=300, seed=42)
+
+    # Record completion
+    art_path = manifest.record_completion(
+        policy="P3",
+        regime="localized",
+        seed=42,
+        run_result=MockRunResult(),
+        event_metrics=MockEventMetrics(),
+        wall_clock_duration_s=2.5,
+        drift_config=drift_cfg,
+        window_size=10000,
+    )
+
+    assert art_path.exists()
+    assert validate_e3_run_artifact(art_path)
+    assert manifest.is_job_completed("P3", "localized", 42, window_size=10000)
+    assert manifest.jobs[job_id].status == "COMPLETED"
+    assert manifest.jobs[job_id].pr_auc == 0.85
+    assert manifest.jobs[job_id].delta_pr_auc == -0.16
+
+    # Test recovery when manifest object is re-created
+    new_manifest = E3ExperimentManifest(
+        manifest_path=manifest_path,
+        artifacts_dir=artifacts_dir,
+        zip_archive_path=zip_path,
+    )
+    assert new_manifest.is_job_completed("P3", "localized", 42, window_size=10000)
+    df = new_manifest.get_summary_dataframe()
+    assert len(df) == 1
+    assert df.iloc[0]["job_id"] == job_id
+
