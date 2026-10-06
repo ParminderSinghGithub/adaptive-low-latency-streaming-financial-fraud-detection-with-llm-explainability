@@ -1,0 +1,60 @@
+# Experiment E3: Controlled Synthetic Drift-Regime Interaction Configuration
+# Objective 2: RQ2 / Hypothesis H2
+# Evaluates P0–P3 across 4 distinct concept drift regimes with known ground-truth onsets.
+
+experiment: "E3"
+dataset: "ieee_cis"
+window_size: 10000
+seeds:
+  - 42
+  - 101
+  - 123
+  - 256
+  - 314
+  - 420
+  - 555
+  - 666
+  - 777
+  - 909
+
+policies:
+  - "P0"  # Continuous incremental baseline
+  - "P1"  # Periodic global windowed replacement
+  - "P2"  # Global ADWIN-triggered replacement
+  - "P3"  # Segment-aware ADWIN-triggered replacement
+
+shared_perturbation:
+  feature_pairs:
+    - ["C1", "C2"]
+    - ["C3", "C4"]
+    - ["card1", "card2"]
+
+regimes:
+  sudden:
+    regime: "sudden"
+    t_drift: 25000
+    description: "Abrupt permutation of discriminative velocity and card feature mappings at t_drift"
+
+  gradual:
+    regime: "gradual"
+    t_drift: 25000
+    transition_width: 5000
+    description: "Sigmoidal probability transition between baseline and shifted feature distributions"
+
+  recurring:
+    regime: "recurring"
+    t_drift: 25000
+    recurrence_period: 25000
+    description: "Periodic oscillation alternating between Concept A and Concept B"
+
+  localized:
+    regime: "localized"
+    t_drift: 25000
+    target_segment: "C"
+    segment_col: "ProductCD"
+    description: "Drift injected exclusively into ProductCD=='C' sub-population while other segments remain stable"
+
+evaluation:
+  horizon: 5000
+  recovery_window: 1000
+  recovery_tolerance: 0.05
